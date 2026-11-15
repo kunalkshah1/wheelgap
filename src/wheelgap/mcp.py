@@ -977,14 +977,15 @@ class Server:
         if version is None:
             notes: tuple[str, ...] = ()
             with self._roots_changed:
-                pending = self._roots_request
-                if _relative_paths({"name": name, "arguments": arguments}) and pending is not None:
-                    # Wait once per request: a client that never answers costs the bound once, not on every call.
-                    if pending != self._roots_timed_out and not self._roots_changed.wait_for(
+                relative = _relative_paths({"name": name, "arguments": arguments})
+                # Wait once per request: a client that never answers costs the bound once, not on every call.
+                if relative and self._roots_request not in (None, self._roots_timed_out):
+                    if not self._roots_changed.wait_for(
                         lambda: self._roots_request is None, timeout=_ROOTS_WAIT_SECONDS
                     ):
-                        self._roots_timed_out = pending
-                if self._roots_request is not None and self._roots_request == self._roots_timed_out:
+                        # The request outstanding now: roots/list_changed may have sent a newer one meanwhile.
+                        self._roots_timed_out = self._roots_request
+                if relative and self._roots_request is not None and self._roots_request == self._roots_timed_out:
                     notes = (
                         f"roots/list did not answer within {_ROOTS_WAIT_SECONDS:g} s; relative paths use the last "
                         "known roots and the server's working directory",

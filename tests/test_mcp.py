@@ -1071,12 +1071,17 @@ def test_roots_timeout_waits_once_per_request(fake_pypi, fixtures, monkeypatch):
             out.wait_for(lambda m: m.get("id") == 1),
             call("check_lockfile", 2, path="uvproj", python="3.13"),
             out.wait_for(lambda m: m.get("id") == 2),
+            call("list_targets", 3),
+            out.wait_for(lambda m: m.get("id") == 3),
         ),
         out,
     )
     results = [m["result"]["structuredContent"] for m in out.messages if m.get("id") in (1, 2)]
     assert len(results) == 2 and len(waits) == 1
     assert all(any("roots/list did not answer" in note for note in r["notes"]) for r in results)
+    # A call with no relative path gets no note about them.
+    (targets,) = [m["result"]["structuredContent"] for m in out.messages if m.get("id") == 3]
+    assert "roots/list" not in json.dumps(targets)
 
 
 @pytest.mark.parametrize("answer", [roots_answer(), {"jsonrpc": "2.0", "id": "wheelgap-roots-1", "error": {}}])
