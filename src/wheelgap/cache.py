@@ -135,7 +135,7 @@ _BUILD_FIELDS: dict[str, type | tuple[type, ...]] = {
 
 
 def _build_key(index: str, sha256: str) -> str:
-    return f"build-v1 {sha256} {index}"
+    return f"build-v2 {sha256} {index}"
 
 
 def load_build(index: str, name: str, version: str, sha256: str) -> dict | None:
