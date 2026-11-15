@@ -397,6 +397,9 @@ def _root_pyproject(stream: _Limited) -> bytes | None:
       through a link, a device, or a member type pip doesn't know;
     - links together with non-ASCII names: macOS folds case and Unicode forms in ways a comparison here can't follow
       (ASCII lower-casing is exact, and no non-ASCII name folds to pyproject.toml);
+    - a path that is both a file and a folder (explicitly or by a deeper member), its names compared as macOS
+      would (see _fold_name), or a file named `.`: pip fails to unpack those;
+    - more than SDIST_MAX_NAME_COUNT names in any of the sets kept, or SDIST_MAX_NAMES characters of them;
     - a pyproject.toml that isn't one plain file named exactly `<top>/pyproject.toml`, with one content.
     The whole tar is read, but only that file is kept, and the names of earlier files (for hard links).
     """
