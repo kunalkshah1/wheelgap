@@ -372,7 +372,7 @@ def _windows_alias(part: str) -> bool:
 
 
 SDIST_MAX_NAMES = 16 * 1024 * 1024  # characters of retained names, including implied folders
-SDIST_MAX_NAME_COUNT = 100_000  # bound set/dict overhead even when names are short
+SDIST_MAX_NAME_COUNT = 100_000  # names kept in each of paths, files and links: bounds their overhead for short names
 
 
 def _root_pyproject(stream: _Limited) -> bytes | None:
@@ -436,7 +436,7 @@ def _root_pyproject(stream: _Limited) -> bytes | None:
                 if parent not in paths:
                     paths[parent] = folder
                     kept += len(parent)
-                    if kept > SDIST_MAX_NAMES or len(paths) + len(files) + len(links) > SDIST_MAX_NAME_COUNT:
+                    if kept > SDIST_MAX_NAMES or max(len(paths), len(files), len(links)) > SDIST_MAX_NAME_COUNT:
                         raise SdistRefused("too many members")
             if member.issym() or member.islnk():
                 if _escapes(member, parts, lead):
@@ -454,7 +454,7 @@ def _root_pyproject(stream: _Limited) -> bytes | None:
                 if kept > SDIST_MAX_NAMES:
                     raise SdistRefused("too many members")
                 files.add(name)
-            if kept > SDIST_MAX_NAMES or len(paths) + len(files) + len(links) > SDIST_MAX_NAME_COUNT:
+            if kept > SDIST_MAX_NAMES or max(len(paths), len(files), len(links)) > SDIST_MAX_NAME_COUNT:
                 raise SdistRefused("too many members")
             if has_link and (non_ascii or tilde):
                 raise SdistRefused("links with non-ASCII names or a `~`")
