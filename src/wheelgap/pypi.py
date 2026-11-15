@@ -371,7 +371,8 @@ def _windows_alias(part: str) -> bool:
     return part.endswith((".", " ")) or ":" in part
 
 
-SDIST_MAX_NAMES = 16 * 1024 * 1024  # bytes of member names kept, to check hard links against
+SDIST_MAX_NAMES = 16 * 1024 * 1024  # characters of retained names, including implied folders
+SDIST_MAX_NAME_COUNT = 100_000  # bound set/dict overhead even when names are short
 
 
 def _root_pyproject(stream: _Limited) -> bytes | None:
@@ -394,6 +395,7 @@ def _root_pyproject(stream: _Limited) -> bytes | None:
     top: str | None = None
     links: set[str] = set()  # lower-cased paths of links seen so far
     files: set[str] = set()  # names of the files so far, as written, for hard links (tarfile looks them up)
+    paths: dict[str, bool] = {}  # lower-cased paths, including implied folders; True for a folder
     kept = 0
     has_link = non_ascii = tilde = False
     found: bytes | None = None
@@ -426,12 +428,24 @@ def _root_pyproject(stream: _Limited) -> bytes | None:
             path = "/".join(lowered)
             if any("/".join(lowered[:i]) in links for i in range(1, len(parts) + 1)):
                 raise SdistRefused("a member written through a link")
+            for i in range(1, len(parts) + 1):
+                parent = "/".join(lowered[:i])
+                folder = i < len(parts) or member.isdir()
+                if parent in paths and paths[parent] != folder:
+                    raise SdistRefused("a path is both a file and a folder")
+                if parent not in paths:
+                    paths[parent] = folder
+                    kept += len(parent)
+                    if kept > SDIST_MAX_NAMES or len(paths) + len(files) + len(links) > SDIST_MAX_NAME_COUNT:
+                        raise SdistRefused("too many members")
             if member.issym() or member.islnk():
                 if _escapes(member, parts, lead):
                     raise SdistRefused("a link out of the sdist")
                 if member.islnk() and member.linkname.lstrip("/") not in files:
                     raise SdistRefused("a hard link to no earlier file of that name")
                 has_link = True
+                if path not in links:
+                    kept += len(path)
                 links.add(path)
             elif member.isdev():
                 raise SdistRefused("a device")
@@ -440,6 +454,8 @@ def _root_pyproject(stream: _Limited) -> bytes | None:
                 if kept > SDIST_MAX_NAMES:
                     raise SdistRefused("too many members")
                 files.add(name)
+            if kept > SDIST_MAX_NAMES or len(paths) + len(files) + len(links) > SDIST_MAX_NAME_COUNT:
+                raise SdistRefused("too many members")
             if has_link and (non_ascii or tilde):
                 raise SdistRefused("links with non-ASCII names or a `~`")
             if path != "pyproject.toml":
