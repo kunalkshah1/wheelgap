@@ -2,8 +2,7 @@
 
 ## Unreleased
 
-- MCP: wait briefly for the client's roots before resolving a relative path after a legacy handshake, and note when the wait times out. (#318, thanks [@kunalkshah1](https://github.com/kunalkshah1))
-
+- MCP: on the 2024-11-05 and 2025-06-18 handshake, a tool call with a relative path sent right after `notifications/initialized` (as the official Python SDK does) now waits up to 2 seconds for the client's `roots/list` answer, instead of resolving the path against the server's working directory. If no answer comes, it falls back as before and says so in `notes`, and later calls don't wait for that request again. (#318, thanks [@kunalkshah1](https://github.com/kunalkshah1))
 - With `--explain --notes`, packages with gaps only on platforms the tracker does not scan (such as iOS or RISC-V) are no longer sent to wheelgap.github.io. The "add --notes" hint is also suppressed for those runs. (#315, thanks [@kunalkshah1](https://github.com/kunalkshah1))
 - `--dockerfile` now recognizes `index.docker.io/python` and `index.docker.io/library/python` as official Python images. (#306, thanks [@LetMeSleep8h](https://github.com/LetMeSleep8h))
 - A file URL that can't be parsed in `uv.lock`, `pylock.toml`, `poetry.lock` or `pdm.lock` (an unclosed IPv6 bracket, or a space in the host) is now an input error (exit 2) that names the lock file and the package, such as `uv.lock: package b has a file URL that can't be parsed`, instead of `ValueError: Invalid IPv6 URL`. A URL with a space in its host used to be read as if it were fine. (#304, thanks [@Franky100-pig](https://github.com/Franky100-pig))

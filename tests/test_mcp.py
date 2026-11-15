@@ -1044,6 +1044,41 @@ def test_roots_timeout_is_noted_and_a_late_answer_is_used(fake_pypi, fixtures, t
     assert not any("roots/list" in note for note in second["notes"])
 
 
+def test_roots_timeout_waits_once_per_request(fake_pypi, fixtures, monkeypatch):
+    # A client that never answers roots/list costs the wait once; later calls fall back at once, with the note.
+    monkeypatch.chdir(fixtures)
+    monkeypatch.setattr(mcp, "_ROOTS_WAIT_SECONDS", 0.01)
+    waits = []
+    original_init = mcp.Server.__init__
+
+    def init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        wait_for = self._roots_changed.wait_for
+
+        def counted(*a, **k):
+            waits.append(1)
+            return wait_for(*a, **k)
+
+        self._roots_changed.wait_for = counted
+
+    monkeypatch.setattr(mcp.Server, "__init__", init)
+    out = Recorder()
+    mcp.serve(
+        live(
+            init_with_roots(),
+            INITIALIZED,
+            call("check_lockfile", path="uvproj", python="3.13"),
+            out.wait_for(lambda m: m.get("id") == 1),
+            call("check_lockfile", 2, path="uvproj", python="3.13"),
+            out.wait_for(lambda m: m.get("id") == 2),
+        ),
+        out,
+    )
+    results = [m["result"]["structuredContent"] for m in out.messages if m.get("id") in (1, 2)]
+    assert len(results) == 2 and len(waits) == 1
+    assert all(any("roots/list did not answer" in note for note in r["notes"]) for r in results)
+
+
 @pytest.mark.parametrize("answer", [roots_answer(), {"jsonrpc": "2.0", "id": "wheelgap-roots-1", "error": {}}])
 def test_empty_or_failed_roots_answer_releases_the_wait(fake_pypi, fixtures, monkeypatch, answer):
     monkeypatch.chdir(fixtures)

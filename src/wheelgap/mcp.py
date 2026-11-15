@@ -705,6 +705,7 @@ class Server:
         self._roots_sent = 0
         self._roots: tuple[Path, ...] = ()
         self._roots_changed = threading.Condition()  # guards roots while the worker waits; stdin keeps reading
+        self._roots_timed_out: str | None = None  # a roots/list request a call already waited out
 
     def close(self, wait: bool = True) -> None:
         """Wait for queued and running calls to send their results (or, with wait=False, drop the queued ones)."""
@@ -976,9 +977,14 @@ class Server:
         if version is None:
             notes: tuple[str, ...] = ()
             with self._roots_changed:
-                if _relative_paths({"name": name, "arguments": arguments}) and not self._roots_changed.wait_for(
-                    lambda: self._roots_request is None, timeout=_ROOTS_WAIT_SECONDS
-                ):
+                pending = self._roots_request
+                if _relative_paths({"name": name, "arguments": arguments}) and pending is not None:
+                    # Wait once per request: a client that never answers costs the bound once, not on every call.
+                    if pending != self._roots_timed_out and not self._roots_changed.wait_for(
+                        lambda: self._roots_request is None, timeout=_ROOTS_WAIT_SECONDS
+                    ):
+                        self._roots_timed_out = pending
+                if self._roots_request is not None and self._roots_request == self._roots_timed_out:
                     notes = (
                         f"roots/list did not answer within {_ROOTS_WAIT_SECONDS:g} s; relative paths use the last "
                         "known roots and the server's working directory",
