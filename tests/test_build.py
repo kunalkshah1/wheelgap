@@ -1155,6 +1155,13 @@ def test_name_count_cap(tmp_path, fake_files, monkeypatch, kind):
         fetch(fake_files, sdist(tmp_path, PLAIN, *members))
 
 
+def test_name_count_cap_counts_each_file_once(tmp_path, fake_files, monkeypatch):
+    # A file is in both the paths and the hard-link names: five files are five names, not ten.
+    monkeypatch.setattr(pypi, "SDIST_MAX_NAME_COUNT", 5)
+    members = [member(f"pkg-1.0/{i}", b"") for i in range(4)]
+    assert fetch(fake_files, sdist(tmp_path, PLAIN, *members)) is not None
+
+
 def test_implied_folders_count_towards_cap(tmp_path, fake_files, monkeypatch):
     monkeypatch.setattr(pypi, "SDIST_MAX_NAME_COUNT", 5)
     with pytest.raises(pypi.SdistRefused, match="too many"):
