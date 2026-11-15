@@ -1137,7 +1137,7 @@ def test_file_folder_clash(tmp_path, fake_files, directory, file_first):
 
     # pip is optional in the test environment; compare only these synthetic, local archives.
     unpacking = pytest.importorskip("pip._internal.utils.unpacking")
-    with pytest.raises((FileExistsError, NotADirectoryError, IsADirectoryError)):
+    with pytest.raises(OSError):  # FileExistsError, NotADirectoryError or IsADirectoryError; others on Windows
         unpacking.untar_file(str(tmp_path / "pkg-1.0.tar.gz"), str(tmp_path / "unpacked"))
 
 
@@ -1145,6 +1145,25 @@ def test_file_folder_clash(tmp_path, fake_files, directory, file_first):
 def test_file_folder_clash_alias(tmp_path, fake_files, path):
     with pytest.raises(pypi.SdistRefused, match="file.*folder"):
         fetch(fake_files, sdist(tmp_path, PLAIN, member("pkg-1.0/a"), member(f"pkg-1.0/{path}/x")))
+
+
+@pytest.mark.parametrize(
+    "file, folder",
+    [
+        ("sub/\u00e9", "sub/e\u0301/x"),  # NFC and NFD: one name on macOS
+        ("sub/a\u200c", "sub/a/x"),  # HFS+ ignores U+200C
+        ("sub/\u00c9", "sub/\u00e9/x"),  # non-ASCII case
+    ],
+)
+def test_file_folder_clash_unicode_alias(tmp_path, fake_files, file, folder):
+    with pytest.raises(pypi.SdistRefused, match="file.*folder"):
+        fetch(fake_files, sdist(tmp_path, PLAIN, member(f"pkg-1.0/{file}"), member(f"pkg-1.0/{folder}")))
+
+
+def test_file_named_dot_is_refused(tmp_path, fake_files):
+    # `a/.` as a file: pip makes the folder `a`, then fails opening it for writing.
+    with pytest.raises(pypi.SdistRefused, match="named `.`"):
+        fetch(fake_files, sdist(tmp_path, PLAIN, member("pkg-1.0/a/.", b"x")))
 
 
 @pytest.mark.parametrize("kind", [tarfile.REGTYPE, tarfile.DIRTYPE, tarfile.SYMTYPE])
