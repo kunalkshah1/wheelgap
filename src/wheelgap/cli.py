@@ -2365,10 +2365,14 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     for r in rows:
         if r.package.key in ignore_on:
             r.ignored = frozenset(t for t in targets if t.platform in ignore_on[r.package.key])
-    pip_refusals = sum(bool(row.package.pip_refuses) for row in rows)
+    # A uv.lock checked with --online (sources.restore_uv_python_files): the answer is uv's, and pip's differs.
+    pip_refusals = len({(r.package.key, r.package.version) for r in rows if r.package.pip_refuses})
     if pip_refusals and not quiet:
+        what, it = ("package is", "it") if pip_refusals == 1 else ("packages are", "them")
         print(
-            f"wheelgap: note: {pip_refusals} uv lock result(s) include files pip refuses for Requires-Python",
+            f"wheelgap: note: {pip_refusals} {what} checked as uv installs {it}, though pip would refuse {it}: "
+            "uv ignores Requires-Python upper bounds (the text report's --explain says which, and --json lists "
+            "the files in pip_refuses)",
             file=sys.stderr,
         )
     gaps = [r for r in rows if not r.ok]
@@ -2721,9 +2725,12 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 affected = ", ".join(
                     target.label(multi_py) for target in targets if r.results[target] is not Status.NOT_NEEDED
                 )
-                print(f"{r.package.name} {r.package.version} on {affected}: uv ignores Requires-Python upper bounds")
-                for file, why in r.package.pip_refuses.items():
-                    print(f"  {file}: pip refuses it ({why})")
+                # One line per reason, not per file: a release's files nearly always share one Requires-Python.
+                for why in dict.fromkeys(r.package.pip_refuses.values()):
+                    print(
+                        f"{r.package.name} {r.package.version} on {affected}: checked as uv installs it "
+                        f"(uv ignores Requires-Python upper bounds); pip refuses it: {why}"
+                    )
         print()
 
     if not gaps:
