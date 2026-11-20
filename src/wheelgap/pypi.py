@@ -1003,6 +1003,7 @@ def _filter_locked_python(pkg: Package, python: str | None) -> Package:
 
 def apply_locked_python_ranges(packages: list[Package], pythons: tuple[str, ...], *, online: bool) -> None:
     """Apply metadata only to the recorded files that weren't replaced by an explicit index lookup."""
+    versions = tuple(dict.fromkeys(pythons))
     for pkg in packages:
         if (
             pkg.locked_requires_python
@@ -1011,7 +1012,14 @@ def apply_locked_python_ranges(packages: list[Package], pythons: tuple[str, ...]
             and not pkg.error
             and (not online or keeps_locked_files(pkg))
         ):
-            _resolve_pythons(pkg, pythons, _filter_locked_python, None)
+            if len(versions) < 2:
+                _filter_locked_python(pkg, versions[0] if versions else None)
+                continue
+            # Not _resolve_pythons: it gives a package with no version (pylock.toml allows that) the first
+            # Python's answer on every Python.
+            for py in versions:
+                resolved = _filter_locked_python(replace(pkg, resolutions={}), py)
+                pkg.resolutions[py] = next((p for p in pkg.resolutions.values() if p == resolved), resolved)
 
 
 def fill(

@@ -4949,6 +4949,27 @@ def test_offline_locked_package_python_range(capsys, tmp_path, fake_pypi, lockfi
     assert run(capsys, str(path), "--online", "--no-cache", "-t", "linux-x86_64", "-p", "3.13")[0] == 1
 
 
+@pytest.mark.parametrize("order", ["3.13,3.12", "3.12,3.13"])
+def test_offline_locked_python_range_without_a_version(capsys, tmp_path, fake_pypi, order):
+    """pylock.toml lets a package leave `version` out. Each Python still gets its own answer, whatever the -p order."""
+    path = tmp_path / "pylock.toml"
+    path.write_text(
+        '[[packages]]\nname = "purewheel"\nrequires-python = "<3.13"\n'
+        'wheels = [{name = "purewheel-3.1-py3-none-any.whl"}]\n',
+        encoding="utf-8",
+    )
+    code, out, _ = run(capsys, str(path), "--offline", "-t", "linux-x86_64", "-p", order, "--json")
+    assert code == 1
+    statuses = {
+        target: status
+        for package in json.loads(out)["packages"]
+        for target, status in package["results"].items()
+        if status != "n/a"
+    }
+    assert statuses == {"3.12 linux-x86_64": "wheel", "3.13 linux-x86_64": "missing"}
+    assert fake_pypi == []
+
+
 @pytest.mark.parametrize(
     ("lockfile", "key", "metadata"),
     [
