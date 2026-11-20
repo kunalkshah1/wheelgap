@@ -1283,6 +1283,7 @@ def render_markdown(
     dropped: dict[str, str] | None = None,
     issues_urls: dict[int, str | None] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
+    fix_hint: bool = False,
 ) -> list[str]:
     """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment)."""
     plain = Style(False)
@@ -1378,6 +1379,8 @@ def render_markdown(
                     ]
             if sug_lines:
                 out += [*sug_lines, ""]
+    if fix_hint:
+        out += [FIX_HINT, ""]
     return out
 
 
@@ -1629,6 +1632,20 @@ def version_suggestions(
     }
 
 
+FIX_HINT = "Run with --fix to see whether wheelgap's gap wheel index has a wheel for these."
+
+
+def gap_wheel_candidates(
+    gaps: list[Row], targets: list[Target], sources: list[Source], index_url: str | None
+) -> tuple[list[Row], list[Row], dict[int, Source], frozenset[str]]:
+    """Rows that could use a gap wheel, without reading the gap wheel list."""
+    private = origin.private_names(sources, simple_index=index_url)
+    source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
+    candidates = [r for r in gaps if gapwheels.candidates(r, targets)]
+    wanted = [r for r in candidates if gapwheels.eligible(r, source_of[id(r.package)], index_url, private)]
+    return candidates, wanted, source_of, private
+
+
 def gap_wheel_fills(
     gaps: list[Row],
     targets: list[Target],
@@ -1653,10 +1670,7 @@ def gap_wheel_fills(
                 file=sys.stderr,
             )
         return []
-    private = origin.private_names(sources, simple_index=index_url)
-    source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
-    candidates = [r for r in gaps if gapwheels.candidates(r, targets)]
-    wanted = [r for r in candidates if gapwheels.eligible(r, source_of[id(r.package)], index_url, private)]
+    candidates, wanted, source_of, private = gap_wheel_candidates(gaps, targets, sources, index_url)
     # Only those the origin rule turned away: a --no-binary package wouldn't use a wheel anyway.
     unchecked = [
         r.package.name
@@ -2486,6 +2500,14 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         if args.fix
         else None
     )
+    fix_hint = (
+        not args.fix
+        and not args.json
+        and not quiet
+        and not offline
+        and origin.other_index(index_url) is None
+        and bool(gap_wheel_candidates(gaps, targets, sources, index_url)[1])
+    )
 
     if args.print_gap_wheel_snippet:  # one input of gapwheels.SNIPPET_KINDS, checked when it was read
         multi_py = len({t.python for t in targets}) > 1
@@ -2590,6 +2612,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                         dropped=dropped,
                         issues_urls=issues_urls,
                         pi_wheels=pi_wheels,
+                        fix_hint=fix_hint,
                     ),
                     *gapwheels.markdown_lines(fills or [], multi_py),
                 ]
@@ -2696,6 +2719,8 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         print(style.dim(line))
     if not args.explain:
         print(style.dim("Run with --explain to see which wheels were rejected and why."))
+    if fix_hint:
+        print(style.dim(FIX_HINT))
     if source_allowed and not args.exit_zero:
         print(style.dim("Source builds are allowed (--fail-on missing), so this run passes."))
     for ln in fix_lines:  # a gap wheel fills only a gap, so the runs that return early above have none

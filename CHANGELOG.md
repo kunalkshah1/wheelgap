@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- The weekly accuracy benchmark checks wheelgap’s PyPI wheel predictions against uv as well as pip, with a separate report for each installer (#579, thanks [@kunalkshah1](https://github.com/kunalkshah1)).
+- The weekly accuracy benchmark checks wheelgap's PyPI wheel predictions against uv as well as pip, with a separate report for each installer (#579, thanks [@kunalkshah1](https://github.com/kunalkshah1)).
+- Text and Markdown reports suggest `--fix` when a gap may be filled by a wheel on wheelgap's gap wheel index, without looking up the list. (#574, thanks [@kunalkshah1](https://github.com/kunalkshah1))
 - A `pyproject.toml` beside the lock (its `[tool.wheelgap]` table and uv's `[tool.uv]` build restrictions) and a `uv.toml` beside the lock are read with a byte order mark tolerated, and a file that isn't UTF-8 is an input error naming the file, instead of a bare `UnicodeDecodeError` that names nothing (#570, thanks [@bfs2021](https://github.com/bfs2021))
 - A `uv.lock` checked with no `--extra` or `--group` is now checked the way `uv sync --all-packages --all-extras --all-groups` installs it: a dependency's extras count only where some edge asks for them on that target. Before, every extra of every package was followed, which could list packages no install reaches, such as numpy, onnxruntime and flatbuffers on Python 3.15 for pydantic-ai's lock. (#572)
 - Scripts and `pyproject.toml` honour uv's `exclude-newer` and `exclude-newer-package` (from `[tool.uv]`, or a `uv.toml` beside the `pyproject.toml`; for a uv workspace member, from the workspace root's, as uv does), with and without `--deps`: files uploaded after the cutoff are left out, exact pins' included, and a file with no upload time makes its package unknown rather than a guess. Relative durations are refused. (#542, thanks [@kushaldave002](https://github.com/kushaldave002))
