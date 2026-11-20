@@ -8,7 +8,7 @@ import re
 import shlex
 import tomllib
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -94,6 +94,10 @@ class Package:
     # outside the project's own range. Without the markers the package would be reported `missing` on a Python the
     # installer never installs it for (numpy = [{version = "1.26.4", python = "<3.13"}, ...] in pyproject.toml).
     locked_requires_python: str | None = None
+    # Yanked status of Python-rejected files, needed when applying uv's upper-bound policy.
+    python_rejected_yanked: frozenset[str] = frozenset()
+    # Files admitted by uv that pip would refuse for this Python.
+    pip_refuses: dict[str, str] = field(default_factory=dict)
     # Distribution selection policy from requirements files or uv project configuration.
     no_binary: bool = False
     only_binary: bool = False
@@ -273,6 +277,51 @@ def pythons_outside_lock(source: Source, targets: Iterable[Target], *, bounds_on
         if not any(spec.contains(v, prereleases=True) for v in tries):
             out.append(t.python)
     return list(dict.fromkeys(out))
+
+
+def uv_ignores_python_rejection(requires: str, python: str) -> bool:
+    """Whether the target misses only an explicit upper bound, using the index check's late-patch version."""
+    try:
+        spec = SpecifierSet(requires)
+        if any(clause.operator not in {"<", "<=", ">", ">=", "=="} or clause.version.endswith(".*") for clause in spec):
+            return False
+        version = f"{python}.99"
+        lower = SpecifierSet(",".join(str(clause) for clause in spec if clause.operator not in {"<", "<="}))
+        return not spec.contains(version) and lower.contains(version)
+    except (InvalidSpecifier, InvalidVersion):
+        return False
+
+
+def restore_uv_python_files(packages: Iterable[Package], pythons: Iterable[str]) -> None:
+    """Apply uv's policy to the looked-up distributions for each Python."""
+    for pkg in packages:
+        restored_variants: list[Package] = []
+        for python in pythons:
+            variant = pkg.resolutions.get(python, pkg)
+            if variant.files is None or variant.error:
+                continue
+            # Index resolution coalesces identical answers. Copy before restoring files for just one Python.
+            refusals = {
+                filename: reason
+                for filename, reason in variant.requires_python_rejected.items()
+                if uv_ignores_python_rejection(reason.removeprefix("requires Python "), python)
+            }
+            if not refusals:
+                continue
+            restored = replace(
+                variant,
+                files=[*variant.files, *refusals],
+                requires_python_rejected={
+                    file: reason for file, reason in variant.requires_python_rejected.items() if file not in refusals
+                },
+                yanked=variant.yanked | (variant.python_rejected_yanked & refusals.keys()),
+                pip_refuses=refusals,
+                resolutions={},
+            )
+            variant = next((p for p in restored_variants if p == restored), restored)
+            if variant is restored:
+                restored_variants.append(restored)
+            pkg.resolutions[python] = variant
 
 
 def _filename(entry: dict, origin: str, package: str) -> str | None:
@@ -1518,6 +1567,14 @@ def _builds_a_package(data: dict, path: Path) -> bool:
     return (isinstance(flit, dict) and "metadata" in flit) or (isinstance(pdm, dict) and "dependencies" in pdm)
 
 
+def _has_poetry_dependencies(data: dict) -> bool:
+    """Whether [tool.poetry.dependencies] names anything but python."""
+    tool = data.get("tool")
+    poetry = tool.get("poetry") if isinstance(tool, dict) else None
+    poetry_deps = poetry.get("dependencies") if isinstance(poetry, dict) else None
+    return isinstance(poetry_deps, dict) and any(dep.lower() != "python" for dep in poetry_deps)
+
+
 def _project_source(data: dict, path: Path, script: bool = False) -> Source:
     """Shared requirement and provenance handling for project and script metadata (`script`: a # /// script block,
     which errors name instead of [project])."""
@@ -1537,10 +1594,7 @@ def _project_source(data: dict, path: Path, script: bool = False) -> Source:
         # poetry-core 2 builds [tool.poetry.dependencies] into the package whenever [project] lists no dependencies
         # or optional-dependencies (missing or empty: DependencyGroup.dependencies' "legacy mode"). A groups-only file
         # with them is a Poetry project too: --group would leave its dependencies out.
-        tool = data.get("tool")
-        poetry = tool.get("poetry") if isinstance(tool, dict) else None
-        poetry_deps = poetry.get("dependencies") if isinstance(poetry, dict) else None
-        if isinstance(poetry_deps, dict) and any(dep.lower() != "python" for dep in poetry_deps):
+        if _has_poetry_dependencies(data):
             raise SourceError(
                 f"{path}: the dependencies are in [tool.poetry.dependencies], not [project] dependencies, "
                 "so wheelgap can't read them; check poetry.lock instead"
@@ -2802,18 +2856,46 @@ def find_lockfile(directory: Path, pixi: bool = False) -> Path:
         if candidate.is_file():
             return candidate
     hint = "Pass a file, or package names like `wheelgap numpy psycopg2`."
-    if _has_project_table(directory / "pyproject.toml"):
-        pyproject = directory / "pyproject.toml"
-        hint = f"To check the direct dependencies in its pyproject.toml, run `wheelgap {pyproject}`. " + hint
+    pyproject = directory / "pyproject.toml"
+    project_hint = _pyproject_hint(pyproject)
+    if project_hint:
+        hint = project_hint + " " + hint
     raise SourceError(f"no lockfile found in {directory} (looked for {', '.join(LOCKFILES)}). {hint}")
 
 
-def _has_project_table(pyproject: Path) -> bool:
-    """For the "no lockfile" hint only: a missing or unreadable file just means no hint."""
+# A dependency group's name as PEP 735 allows it: letters, digits, `.`, `-` and `_`, starting and ending with a
+# letter or digit.
+_GROUP_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+
+
+def _pyproject_hint(pyproject: Path) -> str | None:
+    """For the "no lockfile" error only: the command that checks the folder's pyproject.toml instead, when there is
+    one that would work. A missing or unreadable file just means no hint."""
     try:
-        return isinstance(tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project"), dict)
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
+        return None
+    if isinstance(data.get("project"), dict):
+        return f"To check the direct dependencies in its pyproject.toml, run `wheelgap {pyproject}`."
+    groups = data.get("dependency-groups")
+    if "project" in data or not isinstance(groups, dict):
+        return None
+    # What _project_source refuses with --group: a setuptools, flit, PDM-legacy or Poetry project keeps its own
+    # dependencies outside [project], so the hint would only lead to that error.
+    if _builds_a_package(data, pyproject) or _has_poetry_dependencies(data):
+        return None
+    keys = [canonicalize_name(name) for name in groups]
+    if len(set(keys)) != len(keys):
+        return None  # two groups that are the same once normalized: refused whichever group is asked for
+    # The names are text from the file, and this message goes to a terminal, a CI log or an MCP client: only names
+    # PEP 735 allows are repeated, normalized as the `--group` error lists them.
+    names = sorted({canonicalize_name(name) for name in groups if _GROUP_NAME.fullmatch(name)})
+    if not names:
+        return None
+    return (
+        f"To check a dependency group in its pyproject.toml, run `wheelgap {pyproject} --group NAME` "
+        f"(groups: {', '.join(names)})."
+    )
 
 
 def parse_dist(path: Path) -> Source:

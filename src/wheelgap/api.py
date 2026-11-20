@@ -41,6 +41,7 @@ from .sources import (
     find_lockfile,
     load_file,
     pythons_outside_lock,
+    restore_uv_python_files,
     select_pyproject_extras,
     select_pyproject_groups,
     select_uv_dependencies,
@@ -123,6 +124,7 @@ class Result:
     # Only check_lockfile() and check_packages(deps=True) fill it, and only for inputs with a dependency graph.
     direct: dict[Target, tuple[str, ...]] = field(default_factory=dict)
     issues_url: str | None = None
+    pip_refuses: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -196,6 +198,8 @@ class Result:
             out["bundled_versions"] = dict(self.bundled_versions)
         if self.bundled_version is not None or self.bundled_versions:
             out["bundled_version_differs"] = self.bundled_version_differs
+        if self.pip_refuses:
+            out["pip_refuses"] = dict(self.pip_refuses)
         if explain:
             out["rejected"] = {
                 t.label(True): [{"file": f, "reason": why} for f, why in rejected]
@@ -267,6 +271,7 @@ def _result(
             t: tuple(dict.fromkeys(direct_via[t])) for t, s in statuses.items() if s in _TRACED and direct_via.get(t)
         },
         issues_url=issues_url,
+        pip_refuses=dict(pkg.pip_refuses),
     )
     object.__setattr__(result, "_resolutions", pkg.resolutions)
     return result
@@ -600,6 +605,8 @@ def _check_lockfile(
     if lock and not online and not offline and pythons_outside_lock(source, targets):
         recheck_lock(source.packages)
     apply_locked_python_ranges(source.packages, pythons, online=online)
+    if online and source.uv_packages is not None:
+        restore_uv_python_files(source.packages, pythons)
     rows: list[Row] = [r for r in check([source], targets) if r.needed]
     issues = explain_issues_urls(rows, [source])
     return (

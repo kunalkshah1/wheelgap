@@ -877,6 +877,7 @@ def _fill_simple_data(pkg: Package, data: dict, python: str | None) -> Package:
             rejected_entries = [e for e in entries if not _supports_python(e, python, "requires-python")]
             pkg.files = [e["filename"] for e in live_entries]
             pkg.yanked = frozenset(e["filename"] for e in live_entries if _is_yanked(e))
+            pkg.python_rejected_yanked = frozenset(e["filename"] for e in rejected_entries if _is_yanked(e))
             pkg.requires_python_rejected = {
                 e["filename"]: f"requires Python {e['requires-python']}" for e in rejected_entries
             }
@@ -1136,6 +1137,7 @@ def _fill_json_data(pkg: Package, data: dict, python: str | None, base: str) -> 
             rejected = [u for u in urls if not _supports_python(u, python)]
             pkg.files = [u["filename"] for u in live]
             pkg.yanked = frozenset(u["filename"] for u in live if u.get("yanked"))
+            pkg.python_rejected_yanked = frozenset(u["filename"] for u in rejected if u.get("yanked"))
             pkg.requires_python_rejected = {u["filename"]: f"requires Python {u['requires_python']}" for u in rejected}
         else:
             urls = _files(data.get("urls", []))

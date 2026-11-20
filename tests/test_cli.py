@@ -2260,6 +2260,7 @@ def _assert_matches_output_schema(data):
             "suggest",
             "last_with_wheel",
             "gap_wheel",
+            "pip_refuses",
         }
         assert isinstance(pkg["name"], str) and pkg["name"]
         assert pkg["version"] is None or isinstance(pkg["version"], str)
@@ -2312,6 +2313,8 @@ def _assert_matches_output_schema(data):
                 assert wheel.get("install", "pip install --extra-index-url ").startswith(
                     "pip install --extra-index-url "
                 )
+        if "pip_refuses" in pkg:  # files uv installs from a uv.lock and pip would refuse: never an empty object
+            assert pkg["pip_refuses"] and all(isinstance(why, str) and why for why in pkg["pip_refuses"].values())
         if "last_with_wheel" in pkg:  # an older release for gap targets no newer one has a wheel for
             assert "suggest" in pkg and not set(pkg["last_with_wheel"]) & set(pkg["suggest"])
             assert set(pkg["last_with_wheel"]) <= set(pkg["rejected"])
@@ -2905,6 +2908,23 @@ def test_directory_without_lockfile_suggests_pyproject(capsys, fake_pypi, tmp_pa
     assert code == 2
     assert "no lockfile found" in err
     assert f"wheelgap {tmp_path / 'pyproject.toml'}" in err
+
+
+def test_directory_with_groups_only_pyproject_suggests_group(capsys, fake_pypi, tmp_path):
+    (tmp_path / "pyproject.toml").write_text(GROUPS_ONLY_PYPROJECT, encoding="utf-8")
+    code, _, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64")
+    assert code == 2
+    assert "no lockfile found" in err
+    assert f"wheelgap {tmp_path / 'pyproject.toml'} --group NAME` (groups: shared, test)." in err
+    assert not fake_pypi
+
+
+def test_directory_with_groups_only_pyproject_in_a_buildable_project_has_no_group_hint(capsys, fake_pypi, tmp_path):
+    (tmp_path / "pyproject.toml").write_text(GROUPS_ONLY_PYPROJECT, encoding="utf-8")
+    (tmp_path / "setup.py").write_text("", encoding="utf-8")
+    code, _, err = run(capsys, str(tmp_path), "-p", "3.13", "-t", "linux-x86_64")
+    assert code == 2
+    assert "no lockfile found" in err and "--group" not in err
 
 
 # --github-annotations
@@ -5007,3 +5027,88 @@ def test_offline_locked_package_python_range_unrestricted(capsys, tmp_path, fake
     )
     assert run(capsys, str(path), "--offline", "-t", "linux-x86_64", "-p", "3.13")[0] == 0
     assert fake_pypi == []
+
+
+@pytest.mark.parametrize("lockname", ["uv.lock", "app.py.lock"])
+def test_uv_lock_online_ignores_python_upper_bound(capsys, tmp_path, fake_pypi, monkeypatch, lockname):
+    from conftest import FAKE_INDEX
+
+    from wheelgap import check_lockfile, make_targets
+
+    filename = "purewheel-3.1-py3-none-any.whl"
+    monkeypatch.setitem(FAKE_INDEX, "purewheel", {"3.1": [{"filename": filename, "requires_python": ">=3.10,<3.15"}]})
+    lock = tmp_path / lockname
+    manifest = '[manifest]\nrequirements = [{ name = "purewheel" }]\n' if lockname.endswith(".py.lock") else ""
+    lock.write_text(
+        'version = 1\nrequires-python = ">=3.12"\n' + manifest + "\n[[package]]\n"
+        'name = "purewheel"\nversion = "3.1"\nsource = {registry = "https://pypi.org/simple"}\n'
+        f'wheels = [{{url = "https://files.pythonhosted.org/{filename}"}}]\n',
+        encoding="utf-8",
+    )
+    args = (str(lock), "--no-cache", "-p", "3.15", "-t", "linux-x86_64")
+    assert run(capsys, *args, "--offline")[0] == 0
+    code, out, err = run(capsys, *args, "--online", "--json", "--explain")
+    assert code == 0
+    _assert_matches_output_schema(json.loads(out))
+    package = json.loads(out)["packages"][0]
+    assert package["results"] == {"linux-x86_64": "wheel"}
+    assert package["pip_refuses"] == {filename: "requires Python >=3.10,<3.15"}
+    assert "note: 1 package is checked as uv installs it, though pip would refuse it" in err
+    assert (
+        "purewheel 3.1 on linux-x86_64: checked as uv installs it (uv ignores Requires-Python upper bounds); "
+        "pip refuses it: requires Python >=3.10,<3.15"
+    ) in run(capsys, *args, "--online", "--explain")[1]
+    targets = make_targets("3.15", "linux-x86_64")
+    result = check_lockfile(lock, targets, online=True)[0]
+    assert result.statuses[targets[0]] is Status.WHEEL
+    assert result.to_dict()["pip_refuses"] == package["pip_refuses"]
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("purewheel==3.1\n", encoding="utf-8")
+    code, out, _ = run(capsys, str(requirements), *args[1:], "--online", "--json")
+    assert code == 1
+    assert json.loads(out)["packages"][0]["results"] == {"linux-x86_64": "missing"}
+
+
+def test_uv_lock_online_python_upper_bound_is_per_python(capsys, tmp_path, fake_pypi, monkeypatch):
+    """With several Pythons, only the one pip refuses gets its files back, and only its entry has pip_refuses."""
+    from conftest import FAKE_INDEX
+
+    filename = "purewheel-3.1-py3-none-any.whl"
+    monkeypatch.setitem(FAKE_INDEX, "purewheel", {"3.1": [{"filename": filename, "requires_python": ">=3.10,<3.15"}]})
+    lock = tmp_path / "uv.lock"
+    lock.write_text(
+        'version = 1\nrequires-python = ">=3.12"\n\n[[package]]\n'
+        'name = "purewheel"\nversion = "3.1"\nsource = {registry = "https://pypi.org/simple"}\n'
+        f'wheels = [{{url = "https://files.pythonhosted.org/{filename}"}}]\n',
+        encoding="utf-8",
+    )
+    args = (str(lock), "--no-cache", "--online", "--json", "-p", "3.14,3.15", "-t", "linux-x86_64")
+    code, out, err = run(capsys, *args)
+    assert code == 0
+    data = json.loads(out)
+    _assert_matches_output_schema(data)
+    assert [(p["results"], p.get("pip_refuses")) for p in data["packages"]] == [
+        ({"3.14 linux-x86_64": "wheel", "3.15 linux-x86_64": "n/a"}, None),
+        ({"3.14 linux-x86_64": "n/a", "3.15 linux-x86_64": "wheel"}, {filename: "requires Python >=3.10,<3.15"}),
+    ]
+    assert "note: 1 package is checked as uv installs it" in err
+    assert "pip would refuse" not in run(capsys, *args, "-q")[2]
+
+
+@pytest.mark.parametrize(
+    ("requires", "python", "ignores"),
+    [
+        (">=3.10,<3.15", "3.15", True),
+        ("<=3.14", "3.15", True),
+        ("<3.15", "3.14", False),
+        (">=3.10,<3.15", "3.9", False),
+        ("==3.14.*,<3.15", "3.15", False),
+        ("~=3.13.0,<3.15", "3.15", False),
+        ("!=3.15.*,<3.15", "3.15", False),
+        ("invalid", "3.15", False),
+    ],
+)
+def test_uv_ignores_only_explicit_python_upper_bounds(requires, python, ignores):
+    from wheelgap.sources import uv_ignores_python_rejection
+
+    assert uv_ignores_python_rejection(requires, python) is ignores
