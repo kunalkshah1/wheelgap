@@ -69,6 +69,11 @@ Packages that can't come from an index, such as Git, path or URL dependencies, a
 is walked per target from the project and workspace members (and the lock's dependency groups), so a package that
 only a Windows-only dependency pulls in isn't reported on Linux.
 
+Both offline and online checks follow `uv sync`. When `--online` finds files excluded only by a
+`Requires-Python` upper bound, wheelgap follows [uv’s upper-bound policy](https://docs.astral.sh/uv/reference/internals/resolver/#requires-python)
+and keeps those files. The report identifies files pip would refuse, for example when installing from exported
+requirements. The offline lock does not record per-file `Requires-Python`, so this diagnostic needs `--online`.
+
 **Skipped:** packages whose source is `editable`, `virtual`, `git`, `path`, `directory` or `url`. Packages from
 another index keep their locked files and are never looked up on PyPI.
 

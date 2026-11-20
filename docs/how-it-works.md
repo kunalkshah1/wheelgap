@@ -23,7 +23,8 @@ release from one index response. Regular and free-threaded builds of the same Py
 each still checks its own wheel tags. Missing or invalid `Requires-Python` metadata is treated as unrestricted.
 Exact pins (`name==1.2.3`) skip files whose `Requires-Python` excludes the selected Python, as pip does, and resolve
 per Python the same way. Bare package names keep their existing behavior. This applies to both the PyPI JSON API and
-`--index-url` simple indexes.
+`--index-url` simple indexes. Online checks of uv locks follow uv’s policy for explicit upper bounds and flag any
+files pip would refuse.
 
 Distinct resolutions appear as separate rows in text, Markdown and JSON, each with its selected version and only
 that Python's eligible files. Targets using another resolution show `–` (`n/a` in JSON). Identical resolutions share

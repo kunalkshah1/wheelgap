@@ -8,7 +8,7 @@ import re
 import shlex
 import tomllib
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -86,6 +86,10 @@ class Package:
     resolutions: dict[str, Package] = field(default_factory=dict)
     # Files of a pinned release whose Requires-Python excludes the target Python, mapped to their --explain reason.
     requires_python_rejected: dict[str, str] = field(default_factory=dict)
+    # Yanked status of Python-rejected files, needed when applying uv's upper-bound policy.
+    python_rejected_yanked: frozenset[str] = frozenset()
+    # Files admitted by uv that pip would refuse for this Python.
+    pip_refuses: dict[str, str] = field(default_factory=dict)
     # Distribution selection policy from requirements files or uv project configuration.
     no_binary: bool = False
     only_binary: bool = False
@@ -265,6 +269,51 @@ def pythons_outside_lock(source: Source, targets: Iterable[Target], *, bounds_on
         if not any(spec.contains(v, prereleases=True) for v in tries):
             out.append(t.python)
     return list(dict.fromkeys(out))
+
+
+def uv_ignores_python_rejection(requires: str, python: str) -> bool:
+    """Whether the target misses only an explicit upper bound, using the index check's late-patch version."""
+    try:
+        spec = SpecifierSet(requires)
+        if any(clause.operator not in {"<", "<=", ">", ">=", "=="} or clause.version.endswith(".*") for clause in spec):
+            return False
+        version = f"{python}.99"
+        lower = SpecifierSet(",".join(str(clause) for clause in spec if clause.operator not in {"<", "<="}))
+        return not spec.contains(version) and lower.contains(version)
+    except (InvalidSpecifier, InvalidVersion):
+        return False
+
+
+def restore_uv_python_files(packages: Iterable[Package], pythons: Iterable[str]) -> None:
+    """Apply uv's policy to the looked-up distributions for each Python."""
+    for pkg in packages:
+        restored_variants: list[Package] = []
+        for python in pythons:
+            variant = pkg.resolutions.get(python, pkg)
+            if variant.files is None or variant.error:
+                continue
+            # Index resolution coalesces identical answers. Copy before restoring files for just one Python.
+            refusals = {
+                filename: reason
+                for filename, reason in variant.requires_python_rejected.items()
+                if uv_ignores_python_rejection(reason.removeprefix("requires Python "), python)
+            }
+            if not refusals:
+                continue
+            restored = replace(
+                variant,
+                files=[*variant.files, *refusals],
+                requires_python_rejected={
+                    file: reason for file, reason in variant.requires_python_rejected.items() if file not in refusals
+                },
+                yanked=variant.yanked | (variant.python_rejected_yanked & refusals.keys()),
+                pip_refuses=refusals,
+                resolutions={},
+            )
+            variant = next((p for p in restored_variants if p == restored), restored)
+            if variant is restored:
+                restored_variants.append(restored)
+            pkg.resolutions[python] = variant
 
 
 def _filename(entry: dict, origin: str, package: str) -> str | None:

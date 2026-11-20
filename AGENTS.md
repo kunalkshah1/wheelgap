@@ -97,7 +97,7 @@ uv run --group dev pytest
 A wrong answer from wheelgap that pip proves wrong is the most useful report there is. You may open a bug report for one yourself, and then fix it.
 
 1. Run wheelgap with `--explain` on a real lockfile, such as a popular open-source project's `uv.lock`, `poetry.lock` or pinned `requirements.txt`, across a few targets: `uvx wheelgap uv.lock -t all -p 3.13 -p 3.14t --explain`.
-2. Check a cell you doubt with pip, which has the last word. pip takes `manylinux` and `musllinux` tags literally, so pass every tag the target accepts, from its glibc or musl version down. For `linux-x86_64` with wheelgap's default glibc (2.36), in bash:
+2. For a `uv.lock` cell, check what `uv sync` does too. For other inputs, check a doubtful cell with pip. pip takes `manylinux` and `musllinux` tags literally, so pass every tag the target accepts, from its glibc or musl version down. For `linux-x86_64` with wheelgap's default glibc (2.36), in bash:
 
    ```bash
    platforms="$(for m in $(seq 36 -1 5); do printf -- '--platform manylinux_2_%s_x86_64 ' "$m"; done)"
