@@ -4904,7 +4904,12 @@ def test_project_exclude_newer_applies_to_selected_extra(fake_pypi, capsys, tmp_
 
 LOCKED_PYTHON_FILES = {
     "poetry.lock": ("[[package]]", "python-versions", 'files = [{file = "purewheel-3.1-py3-none-any.whl"}]'),
-    "pdm.lock": ("[[package]]", "requires_python", 'files = [{file = "purewheel-3.1-py3-none-any.whl"}]'),
+    # inherit_metadata: the lock records each package's marker, which the range needs (see the test below)
+    "pdm.lock": (
+        "[[package]]",
+        "requires_python",
+        'files = [{file = "purewheel-3.1-py3-none-any.whl"}]\n\n[metadata]\nstrategy = ["inherit_metadata"]',
+    ),
     "pylock.toml": ("[[packages]]", "requires-python", 'wheels = [{name = "purewheel-3.1-py3-none-any.whl"}]'),
 }
 
@@ -4942,6 +4947,33 @@ def test_offline_locked_package_python_range(capsys, tmp_path, fake_pypi, lockfi
         {"3.1": [{"filename": "purewheel-3.1-py3-none-any.whl", "requires_python": "<3.13"}]},
     )
     assert run(capsys, str(path), "--online", "--no-cache", "-t", "linux-x86_64", "-p", "3.13")[0] == 1
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "key", "metadata"),
+    [
+        # Before lock-version 2.1, a direct dependency's Python marker is only in pyproject.toml.
+        ("poetry.lock", "python-versions", '[metadata]\nlock-version = "2.0"\n'),
+        # Without inherit_metadata, a pdm.lock has no markers on its packages.
+        ("pdm.lock", "requires_python", ""),
+        ("pdm.lock", "requires_python", '[metadata]\nstrategy = ["cross_platform"]\n'),
+    ],
+)
+def test_locked_python_range_needs_markers_on_packages(capsys, tmp_path, fake_pypi, lockfile, key, metadata):
+    """Poetry and PDM install a package only on the Pythons its markers select. A lock that doesn't record them per
+    package can't say whether the range leaves out a Python the package is installed on, so it's read as before."""
+    path = tmp_path / lockfile
+    path.write_text(
+        f'[[package]]\nname = "purewheel"\nversion = "3.1"\n{key} = "<3.13"\n'
+        'files = [{file = "purewheel-3.1-py3-none-any.whl"}]\n\n' + metadata,
+        encoding="utf-8",
+    )
+    code, out, _ = run(capsys, str(path), "--offline", "-t", "linux-x86_64", "-p", "3.12,3.13", "--json")
+    assert code == 0
+    assert [p["results"] for p in json.loads(out)["packages"]] == [
+        {"3.12 linux-x86_64": "wheel", "3.13 linux-x86_64": "wheel"}
+    ]
+    assert fake_pypi == []
 
 
 @pytest.mark.parametrize("restriction", ["", 'python-versions = "*"', 'python-versions = "^3.12"'])
