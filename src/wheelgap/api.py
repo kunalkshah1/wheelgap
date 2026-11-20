@@ -29,7 +29,7 @@ from .check import Row, Status, check, explain, explain_lines, status_for, wheel
 from .deps import Resolver, pinned_complete, resolve_deps
 from .offline import require_offline
 from .pyodide import PyodideLock, bundled_version_differs, bundles, check_locks
-from .pypi import fill_all, recheck_lock
+from .pypi import apply_locked_python_ranges, fill_all, recheck_lock
 from .sources import (
     LOCKFILES,
     Package,
@@ -593,11 +593,13 @@ def _check_lockfile(
         if offline:
             require_offline([source], "offline=True", undo="set offline=False")
 
-    fill_all(source.packages, refresh=online, pythons=tuple(dict.fromkeys(f"{t.major}.{t.minor}" for t in targets)))
+    pythons = tuple(dict.fromkeys(f"{t.major}.{t.minor}" for t in targets))
+    fill_all(source.packages, refresh=online, pythons=pythons)
     # A pyproject.toml or a resolved tree has no lock to re-check (as the command line: its files are PyPI's own).
     lock = source.pyproject_extras is None and not (deps and not pinned_complete(source))
     if lock and not online and not offline and pythons_outside_lock(source, targets):
         recheck_lock(source.packages)
+    apply_locked_python_ranges(source.packages, pythons, online=online)
     rows: list[Row] = [r for r in check([source], targets) if r.needed]
     issues = explain_issues_urls(rows, [source])
     return (

@@ -55,7 +55,15 @@ from .pyodide import (
     check_targets,
     load_pyodide_lock,
 )
-from .pypi import check_index_url, fill_all, keeps_locked_files, previous_release, recheck_lock, split_credentials
+from .pypi import (
+    apply_locked_python_ranges,
+    check_index_url,
+    fill_all,
+    keeps_locked_files,
+    previous_release,
+    recheck_lock,
+    split_credentials,
+)
 from .sarif import write_sarif
 from .sources import (
     Package,
@@ -2259,10 +2267,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 )
     # --online asks the index again but saves the answer, so a plain run afterwards doesn't go back to an older one.
     cached = {"read_cache": not (args.no_cache or args.online), "write_cache": not args.no_cache}
+    pythons = tuple(dict.fromkeys(f"{t.major}.{t.minor}" for t in targets))
     other_index = fill_all(
         packages,
         refresh=args.online,
-        pythons=tuple(dict.fromkeys(f"{t.major}.{t.minor}" for t in targets)),
+        pythons=pythons,
         simple_index=index_url,
         read_cache=cached["read_cache"],
         write_cache=cached["write_cache"],
@@ -2301,6 +2310,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 note += f"; {' and '.join(unchecked)} may show false gaps for those Pythons"
             if unchecked or not quiet:  # quiet runs stay quiet unless the answer may be wrong
                 print(note, file=sys.stderr)
+    apply_locked_python_ranges(packages, pythons, online=args.online)
     skipped = [p for p in packages if p.skip]
     rows = [r for r in check(sources, targets) if r.needed]
     if pyodide_lock:

@@ -133,6 +133,9 @@ targets; see [Targets](targets.md#how-targets-are-chosen).
 **Read:** each package's wheel and sdist filenames, its `marker`, its `index`, and the file's `requires-python`
 (with the same re-check as `uv.lock` for Pythons it leaves out).
 
+When checking recorded files, wheelgap applies each package’s `requires-python` range to the target Python.
+With `--online`, any files fetched from the index use the index’s per-file metadata.
+
 **Skipped:** `vcs`, `directory` and `archive` packages that list no wheels or sdist.
 
 `pylock.toml` has no dependency graph that wheelgap reads, so `--explain` shows no dependency path, and dependency
@@ -141,6 +144,9 @@ selection flags don't apply.
 ## poetry.lock
 
 **Read:** each package's files (from its `files` list, or from `[metadata.files]` in older locks) and its markers.
+
+When checking recorded files, wheelgap applies each package’s `python-versions` range to the target Python.
+With `--online`, any files fetched from the index use the index’s per-file metadata.
 
 **Skipped:** packages whose source type is `git`, `hg`, `svn`, `bzr`, `directory`, `file` or `url`. A package from
 another index (a `legacy` source) keeps its locked files and isn't looked up on PyPI. Old locks that record only
@@ -180,6 +186,9 @@ the lock alone can't tell, wheelgap checks a superset of what any Poetry 2.x ins
 
 **Read:** each package's files (from its `files` list, or from `[metadata.files]` before PDM 2.8) and its `marker`.
 A package with no recorded files is looked up on the index.
+
+When checking recorded files, wheelgap applies each package’s `requires_python` range to the target Python.
+With `--online`, any files fetched from the index use the index’s per-file metadata.
 
 **Skipped:** `git`, `hg`, `svn`, `bzr`, `path`, `url` and `file` packages.
 

@@ -86,6 +86,8 @@ class Package:
     resolutions: dict[str, Package] = field(default_factory=dict)
     # Files of a pinned release whose Requires-Python excludes the target Python, mapped to their --explain reason.
     requires_python_rejected: dict[str, str] = field(default_factory=dict)
+    # Package-level Requires-Python recorded beside the files in Poetry, PDM and pylock formats.
+    locked_requires_python: str | None = None
     # Distribution selection policy from requirements files or uv project configuration.
     no_binary: bool = False
     only_binary: bool = False
@@ -912,6 +914,9 @@ def parse_pylock(path: Path) -> Source:
                 files.append(_filename(p["sdist"], path.name, pkg.name) or f"{p['name']}-{p.get('version')}.tar.gz")
                 pkg.sdist_url, pkg.sdist_sha256 = _sdist_source(p["sdist"], "hashes")
             pkg.files = files
+        requires = p.get("requires-python")
+        if pkg.files is not None and isinstance(requires, str):
+            pkg.locked_requires_python = requires
         pkgs.append(pkg)
     requires = data.get("requires-python")
     return Source(path.name, pkgs, requires_python=requires if isinstance(requires, str) else None)
@@ -966,6 +971,9 @@ def parse_poetry_lock(path: Path) -> Source:
                 None if entries is None else [f for f in (_filename(e, path.name, pkg.name) for e in entries) if f]
             )
         edges[len(pkgs)] = _poetry_edges(p)
+        requires = p.get("python-versions")
+        if pkg.files is not None and isinstance(requires, str):
+            pkg.locked_requires_python = requires
         pkgs.append(pkg)
     # Lock files before 2.1 (all of Poetry 1.x) only record markers on dependency edges, not on
     # packages, so walk the graph from the packages nothing depends on, as for uv.lock.
@@ -1104,6 +1112,8 @@ def _add_once(pkgs: list[Package], seen: dict[tuple[str, str | None], Package], 
             first.registry = pkg.registry  # the other entry is from PyPI: this index decides for both
         else:
             first.skip = "private index"  # pinned to two indexes: no single lookup is safe for both
+    if first.locked_requires_python != pkg.locked_requires_python:
+        first.locked_requires_python = None  # conflicting entries can't establish a release-wide restriction
     if first.markers is not None:
         first.markers = None if pkg.markers is None else first.markers + pkg.markers
 
@@ -1148,6 +1158,9 @@ def parse_pdm_lock(path: Path) -> Source:
             if entries is not None:
                 pkg.files = [f for f in (_filename(e, path.name, pkg.name) for e in entries) if f]
             # Not in either place: leave files as None so the PyPI lookup fills them in.
+        requires = p.get("requires_python")
+        if pkg.files is not None and isinstance(requires, str):
+            pkg.locked_requires_python = requires
         _add_once(pkgs, seen, pkg)
     return Source(
         path.name,

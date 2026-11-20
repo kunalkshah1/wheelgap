@@ -4900,3 +4900,57 @@ def test_project_exclude_newer_applies_to_selected_extra(fake_pypi, capsys, tmp_
     code, out, err = run(capsys, str(path), "--extra", "test", "-p", "3.13", "-t", "win-arm64", "--json")
     assert code == 0
     assert [(p["name"], p["version"]) for p in json.loads(out)["packages"]] == [("dated", "1.0")]
+
+
+LOCKED_PYTHON_FILES = {
+    "poetry.lock": ("[[package]]", "python-versions", 'files = [{file = "purewheel-3.1-py3-none-any.whl"}]'),
+    "pdm.lock": ("[[package]]", "requires_python", 'files = [{file = "purewheel-3.1-py3-none-any.whl"}]'),
+    "pylock.toml": ("[[packages]]", "requires-python", 'wheels = [{name = "purewheel-3.1-py3-none-any.whl"}]'),
+}
+
+
+@pytest.mark.parametrize("lockfile", LOCKED_PYTHON_FILES)
+def test_offline_locked_package_python_range(capsys, tmp_path, fake_pypi, lockfile, monkeypatch):
+    from conftest import FAKE_INDEX
+
+    from wheelgap import check_lockfile, make_targets
+
+    table, key, files = LOCKED_PYTHON_FILES[lockfile]
+    path = tmp_path / lockfile
+    path.write_text(f'{table}\nname = "purewheel"\nversion = "3.1"\n{key} = "<3.13"\n{files}\n', encoding="utf-8")
+    args = (str(path), "--offline", "--explain", "-t", "linux-x86_64", "-p", "3.12,3.13")
+    code, out, _ = run(capsys, *args, "--json")
+    assert code == 1
+    packages = json.loads(out)["packages"]
+    assert [r["results"] for r in packages] == [
+        {"3.12 linux-x86_64": "wheel", "3.13 linux-x86_64": "n/a"},
+        {"3.12 linux-x86_64": "n/a", "3.13 linux-x86_64": "missing"},
+    ]
+    assert packages[1]["rejected"]["3.13 linux-x86_64"] == [
+        {"file": "purewheel-3.1-py3-none-any.whl", "reason": "requires Python <3.13"}
+    ]
+    assert "requires Python <3.13" in run(capsys, *args)[1]
+    targets = make_targets(["3.12", "3.13"], "linux-x86_64")
+    results = check_lockfile(path, targets, offline=True)
+    assert results[0].statuses[targets[0]] is Status.WHEEL
+    assert results[1].statuses[targets[1]] is Status.MISSING
+    assert fake_pypi == []
+    assert run(capsys, str(path), "--online", "--no-cache", "-t", "linux-x86_64", "-p", "3.13")[0] == 0
+    monkeypatch.setitem(
+        FAKE_INDEX,
+        "purewheel",
+        {"3.1": [{"filename": "purewheel-3.1-py3-none-any.whl", "requires_python": "<3.13"}]},
+    )
+    assert run(capsys, str(path), "--online", "--no-cache", "-t", "linux-x86_64", "-p", "3.13")[0] == 1
+
+
+@pytest.mark.parametrize("restriction", ["", 'python-versions = "*"', 'python-versions = "^3.12"'])
+def test_offline_locked_package_python_range_unrestricted(capsys, tmp_path, fake_pypi, restriction):
+    path = tmp_path / "poetry.lock"
+    path.write_text(
+        '[[package]]\nname = "purewheel"\nversion = "3.1"\n'
+        'files = [{file = "purewheel-3.1-py3-none-any.whl"}]\n' + restriction,
+        encoding="utf-8",
+    )
+    assert run(capsys, str(path), "--offline", "-t", "linux-x86_64", "-p", "3.13")[0] == 0
+    assert fake_pypi == []
