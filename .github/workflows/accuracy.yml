@@ -35,6 +35,9 @@ jobs:
           set -o pipefail
           uv run --python 3.14 --no-dev --with pip python scripts/check_against_pip.py | tee accuracy-pip.log
       - name: Compare wheelgap with uv
+        # The uv that setup-uv installs, the latest release, on purpose, as for pip. The script reads uv's
+        # diagnostics by their exact wording: if a release changes it, those checks fail as "couldn't compare"
+        # (exit 2), never as an answer. --python 3.14 without the t: the script refuses a free-threaded build.
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail

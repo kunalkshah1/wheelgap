@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from wheelgap import make_targets
+from wheelgap import Result, make_targets
 from wheelgap.check import Status
 
 
@@ -423,6 +423,7 @@ def test_run_uv_compiles_the_pin_in_isolation(monkeypatch):
     monkeypatch.setenv("UV_INDEX", "https://example.invalid/simple")
     monkeypatch.setenv("uv_offline", "true")
     monkeypatch.setenv("MACOSX_DEPLOYMENT_TARGET", "99.0")
+    monkeypatch.setenv("COLUMNS", "40")  # uv wraps its diagnostics to it, which classify_uv() can't read
     calls = _fake_run(monkeypatch, stdout="my-pkg==1.0\n")
     target = _target("macos-arm64", macos="14.5")
     assert script.run_uv("My_Pkg", "1.0", target, "aarch64-apple-darwin").wheel == "wheel"
@@ -432,7 +433,11 @@ def test_run_uv_compiles_the_pin_in_isolation(monkeypatch):
     assert cmd[cmd.index("--default-index") + 1] == script.INDEX
     assert kwargs["input"] == "my-pkg==1.0\n"
     assert kwargs["env"]["MACOSX_DEPLOYMENT_TARGET"] == "14.5"
-    assert not any(key.upper().startswith("UV_") for key in kwargs["env"])
+    # None of the caller's UV_* settings: only the one that stops uv wrapping its diagnostics.
+    assert {key: value for key, value in kwargs["env"].items() if key.upper().startswith("UV_")} == {"UV_NO_WRAP": "1"}
+    assert "COLUMNS" not in {key.upper() for key in kwargs["env"]}
+    # uv's tags take their implementation and free-threaded ABI from the interpreter: it gets this one.
+    assert cmd[cmd.index("--python") + 1] == sys.executable
 
 
 @pytest.mark.parametrize(
@@ -465,6 +470,24 @@ def test_uv_no_wheel_requires_a_positive_diagnostic(pin, log):
 def test_uv_transport_and_unexpected_output_are_errors(code, stdout, stderr):
     answer = script.classify_uv("docopt==0.6.2", code, stdout, stderr)
     assert answer.wheel is None and answer.error
+
+
+def test_uv_wrapped_diagnostic_is_an_error_not_no_wheel():
+    # What uv prints for a release without wheels when COLUMNS is narrow; run_uv() keeps uv from wrapping.
+    wrapped = (
+        UV_NO_SOLUTION + "  cause: Because docopt==0.6.2 has no usable wheels and you require\n"
+        "         docopt==0.6.2, we can conclude that your requirements are unsatisfiable.\n"
+    )
+    answer = script.classify_uv("docopt==0.6.2", 1, "", wrapped)
+    assert answer.wheel is None and answer.error
+
+
+def test_uv_error_keeps_uvs_cause():
+    log = UV_NO_SOLUTION + "  cause: Because docopt was not found in the package registry and you require docopt\n"
+    answer = script.classify_uv("docopt==0.6.2", 1, "", log)
+    assert answer.error is not None
+    assert answer.error.startswith("uv: error: No solution found when resolving dependencies (cause: Because docopt")
+    assert "was not found in the package registry" in answer.error
 
 
 def test_run_uv_timeout(monkeypatch):
@@ -503,4 +526,65 @@ def test_uv_skips_work_when_none_of_the_selected_targets_are_supported(monkeypat
     out = io.StringIO()
     assert script.report(checks, out=out, installer="uv") == 2
     assert "uv pip compile cannot target free-threaded Python" in out.getvalue()
+    assert not calls
+
+
+# A pin is a requirements-style input, which wheelgap answers as pip installs it. uv reads Requires-Python as a
+# lower bound only, so it takes a wheel that pip leaves out for an upper bound: uv answering as uv, not an error.
+
+CAPPED = {"capped-1.0-py3-none-any.whl": "requires Python >=3.9,<3.14"}
+
+
+def _always(answer):
+    return lambda name, version, target: answer
+
+
+def test_uv_taking_a_wheel_past_requires_pythons_upper_bound_is_not_a_disagreement():
+    target = _target("linux-x86_64")
+    capped = Result("capped", "1.0", {target: Status.MISSING}, requires_python_rejected=CAPPED)
+    fine = Result("fine", "1.0", {target: Status.WHEEL})
+    wheel = _always(script.InstallerAnswer(wheel="wheel"))
+    checks = [*script.check_one(capped, [target], wheel, "uv"), *script.check_one(fine, [target], wheel, "uv")]
+    assert [c.compared for c in checks] == [False, True]
+    out = io.StringIO()
+    assert script.report(checks, out=out, installer="uv") == 0  # listed, but it doesn't fail the run
+    text = out.getvalue()
+    assert text.startswith("2 checks: 1 agree with uv (1 wheel, 0 no wheel), 0 disagree, 1 couldn't be compared.")
+    assert "wheelgap answers a pin as pip installs it" in text
+    assert "uv took a wheel that requires Python >=3.9,<3.14: uv ignores Requires-Python's upper bound" in text
+    assert "Disagreements" not in text
+
+
+@pytest.mark.parametrize(
+    ("installer", "rejected", "status", "wheel"),
+    [
+        ("pip", CAPPED, Status.MISSING, True),  # pip is the referee for a pin: nothing excuses a difference from it
+        ("uv", {"capped-1.0-py3-none-any.whl": "requires Python >=3.15"}, Status.MISSING, True),  # uv reads a floor
+        ("uv", {"capped-1.0.tar.gz": "requires Python >=3.9,<3.14"}, Status.MISSING, True),  # no wheel was left out
+        ("uv", {}, Status.SOURCE, True),
+        ("uv", CAPPED, Status.WHEEL, False),  # uv found no wheel where wheelgap found one
+    ],
+)
+def test_other_differences_from_an_installer_stay_disagreements(installer, rejected, status, wheel):
+    target = _target("linux-x86_64")
+    result = Result("capped", "1.0", {target: status}, requires_python_rejected=rejected)
+    answer = script.InstallerAnswer(wheel="wheel" if wheel else None)
+    (check,) = script.check_one(result, [target], _always(answer), installer)
+    assert check.skipped is None and check.compared and not check.agrees
+    out = io.StringIO()
+    assert script.report([check], out=out, installer=installer) == 1
+    if installer == "uv":
+        assert "Disagreements (a pin follows pip, so check the pip run before calling one a wheelgap error)" in (
+            out.getvalue()
+        )
+
+
+def test_main_uv_needs_a_default_cpython(monkeypatch, capsys):
+    # On a free-threaded build (or PyPy) uv would answer for that interpreter's tags, not the target's.
+    monkeypatch.setattr(script, "default_cpython", lambda: False)
+    calls = _fake_run(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        script.main(["--installer", "uv", "numpy"])
+    assert e.value.code == 2
+    assert "default (GIL) build of CPython" in capsys.readouterr().err
     assert not calls
