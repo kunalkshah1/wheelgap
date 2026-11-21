@@ -2359,6 +2359,13 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         for source, needed in zip(sources, needed_by_source, strict=True):
             if source.uv_packages is not None:
                 restore_uv_python_files(needed, pythons)
+    # --dockerfile-inputs: a requirements file whose first install is `RUN uv pip install` is installed by uv's
+    # rules, not pip's. uv ignores a Requires-Python upper bound that makes pip refuse a pin (uv 0.13.1 installs
+    # sktime==0.20.0, Requires-Python <3.12,>=3.8, on Python 3.13; pip finds no matching distribution).
+    uv_files = {requirements for line, requirements in installs if (line, requirements) in uv_installs}
+    for source, needed in zip(sources, needed_by_source, strict=True):
+        if source.path in uv_files:
+            restore_uv_python_files(needed, pythons)
     skipped = [p for p in packages if p.skip]
     rows = [r for r in check(sources, targets) if r.needed]
     if pyodide_lock:

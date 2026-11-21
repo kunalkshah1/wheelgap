@@ -80,16 +80,21 @@ that folder too. Only a strict subset is read:
 - `WORKDIR` with a literal path;
 - plain `COPY SRC... DEST` from the build context (`--chown`, `--chmod` and `--link` are fine);
 - `RUN` lines that are exactly `pip install -r FILE` or `python -m pip install -r FILE` (`--no-cache-dir` is fine),
-  `uv pip install --system -r FILE` (optionally with `--no-cache` or `--no-cache-dir`), or only system package commands joined by `&&` (`apt-get`, `apt`, `apk`, `yum`, `dnf`, `microdnf`, adding users
-  and groups, `mkdir`, `chown`, `chmod`, and `rm` under `/var/lib/apt/lists/`, `/var/cache/` or `/root/.cache/`).
+  or only system package commands joined by `&&` (`apt-get`, `apt`, `apk`, `yum`, `dnf`, `microdnf`, adding users
+  and groups, `mkdir`, `chown`, `chmod`, and `rm` under `/var/lib/apt/lists/`, `/var/cache/` or `/root/.cache/`);
+- **after 0.13.0**: `RUN uv pip install --system -r FILE` (`--no-cache` and `--no-cache-dir` are fine) for a `FILE`
+  named `*.txt` or `*.in`, and the `COPY --from=ghcr.io/astral-sh/uv[:TAG] /uv /uvx DEST/` that puts uv in the image
+  (`/uvx` is optional). `--system` is required, since without it uv installs into a virtual environment. The file is
+  checked as uv installs it: uv ignores an upper bound in a release's `Requires-Python` where pip refuses the
+  release, and the report says which packages that changes.
 
 Anything else in the final stage is an error naming its line, since it may change what pip installs or what `FILE`
-holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount`, a heredoc), `ADD`,
-`COPY --from` other than copying `/uv` and optional `/uvx` from `ghcr.io/astral-sh/uv` into a directory,
-globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a COPY that puts a file named
-`pip.conf` or `pip.ini` anywhere in the image, a `.dockerignore`, a `# syntax=` frontend other than
-`docker/dockerfile` (one pinned by digest, `docker/dockerfile:1@sha256:…`, is read when the Dockerfile has no
-heredoc), copying `uv.toml` or `pyproject.toml` before a uv install, or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile` reads only the image.
+holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount`, a heredoc, any other `uv` command
+or flag), `ADD`, any other `COPY --from`, globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a COPY
+that puts a file named `pip.conf` or `pip.ini` anywhere in the image, a COPY of a `uv.toml` or `pyproject.toml`
+before a uv install, a `.dockerignore`, a `# syntax=` frontend other than `docker/dockerfile` (one pinned by digest,
+`docker/dockerfile:1@sha256:…`, is read when the Dockerfile has no heredoc), or a nested `-r` or `-c` in `FILE`.
+Without this flag, `--dockerfile` reads only the image.
 
 ### `--dockerfile-context` {#dockerfile-context}
 

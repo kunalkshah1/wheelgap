@@ -1129,7 +1129,8 @@ def _system_command(args: str) -> bool:
 
 
 def _pip_install_files(number: int, args: str) -> tuple[list[str], bool]:
-    """The FILEs of a RUN that is exactly `pip install -r FILE...` (or `python -m pip ...`)."""
+    """The FILEs of a RUN that is exactly `pip install -r FILE...` (or `python -m pip ...`, or
+    `uv pip install --system -r FILE...`), and whether uv installs them."""
     unread = (
         "only `RUN pip install -r FILE`, `RUN uv pip install --system -r FILE` and "
         "system package commands (apt-get, apk, dnf...) are read by "
@@ -1177,6 +1178,15 @@ def _pip_install_files(number: int, args: str) -> tuple[list[str], bool]:
         raise DockerfileError(f"line {number}: {unread}")
     if uv and not system:
         raise DockerfileError(f"line {number}: uv pip install needs --system for --dockerfile-inputs")
+    # uv picks the format of `-r FILE` by its name: pylock.toml is a lock, a .py file is a script with inline
+    # metadata, and pyproject.toml, setup.py, setup.cfg and extensionless files are read in other ways again. A .txt
+    # or .in file is a requirements file to uv and to wheelgap alike.
+    # https://github.com/astral-sh/uv/blob/0.13.1/crates/uv-requirements/src/sources.rs (from_local_requirements_file)
+    if uv and (other := next((file for file in files if not file.endswith((".txt", ".in"))), None)):
+        raise DockerfileError(
+            f"line {number}: uv pip install -r {other}: uv reads a file by its name (a lock, a script, a project), "
+            "and --dockerfile-inputs only reads requirements files named *.txt or *.in for uv"
+        )
     return files, uv
 
 
@@ -1187,7 +1197,9 @@ def dockerfile_requirements(
     *,
     uv_installs: set[tuple[int, Path]] | None = None,
 ) -> list[tuple[int, Path]]:
-    """(line, requirements file) for each `RUN pip install -r FILE` in the Dockerfile's final stage.
+    """(line, requirements file) for each `RUN pip install -r FILE` in the Dockerfile's final stage. `RUN uv pip
+    install --system -r FILE` is read too (with the documented `COPY --from=ghcr.io/astral-sh/uv /uv /uvx DEST/`),
+    and `uv_installs`, if given, collects the (line, file) pairs uv installs, which follow uv's rules, not pip's.
 
     FILE is followed back through the WORKDIR and COPY instructions before it to a file in the build context, taken
     to be the Dockerfile's folder (or `context` if given). Only a strict subset is read: a final stage built FROM an

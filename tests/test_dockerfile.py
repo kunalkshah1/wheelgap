@@ -1214,6 +1214,16 @@ def test_cli_dockerfile_inputs_reads_uv_pip_system_install(tmp_path, capsys, fak
         ("COPY . ./", "uv pip install --system -r requirements.txt", ":3: a uv.toml or pyproject.toml"),
         ("COPY --from=ghcr.io/astral-sh/uv /other /bin/", "uv pip install --system -r requirements.txt", ":3: COPY"),
         ("COPY --from=other /uv /bin/", "uv pip install --system -r requirements.txt", ":3: COPY"),
+        # uv reads these by name, as a lock and as a script with inline metadata, not as requirements files.
+        ("COPY requirements.txt pylock.toml", "uv pip install --system -r pylock.toml", ":4: .*-r pylock.toml: uv"),
+        ("COPY requirements.txt deps.py", "uv pip install --system -r deps.py", ":4: .*-r deps.py: uv reads"),
+        ("COPY requirements.txt reqs", "uv pip install --system -r reqs", ":4: .*-r reqs: uv reads"),
+        # Not this mode's commands: uv sync, uv add and uv pip sync install by other rules.
+        ("COPY requirements.txt ./", "uv sync", ":4: only `RUN pip install -r FILE`"),
+        ("COPY requirements.txt ./", "uv add -r requirements.txt", ":4: only `RUN pip install -r FILE`"),
+        ("COPY requirements.txt ./", "uv pip sync --system requirements.txt", ":4: only `RUN pip install -r FILE`"),
+        ("COPY requirements.txt ./", "uv pip install --system --python 3.12 -r requirements.txt", ":4: .*--python"),
+        ("COPY requirements.txt ./", "uv pip install --system --index-url=https://e.test -r requirements.txt", ":4:"),
     ],
 )
 def test_dockerfile_inputs_refuses_unsupported_uv_installs(tmp_path, copy, run, message):
@@ -1221,6 +1231,29 @@ def test_dockerfile_inputs_refuses_unsupported_uv_installs(tmp_path, copy, run, 
     (tmp_path / "uv.toml").write_text("no-binary = true\n", encoding="utf-8")
     with pytest.raises(DockerfileError, match=message):
         dockerfile_requirements(path)
+
+
+def test_cli_dockerfile_inputs_checks_a_uv_install_as_uv_installs_it(tmp_path, capsys, fake_pypi, monkeypatch):
+    """uv ignores a Requires-Python upper bound that makes pip refuse a pin, so the same file gets uv's answer under
+    `RUN uv pip install` and pip's under `RUN pip install`."""
+    from conftest import FAKE_INDEX
+
+    filename = "purewheel-3.1-py3-none-any.whl"
+    monkeypatch.setitem(FAKE_INDEX, "purewheel", {"3.1": [{"filename": filename, "requires_python": ">=3.8,<3.12"}]})
+    dockerfile = "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt .\nRUN {} -r requirements.txt\n"
+    path = _context(tmp_path, dockerfile.format("uv pip install --system"))
+    argv = ["--dockerfile", str(path), "--dockerfile-inputs", "--json", "--no-cache"]
+    assert main(argv) == 0
+    result = capsys.readouterr()
+    package = json.loads(result.out)["packages"][0]
+    assert package["results"] == {"linux-x86_64": "wheel"}
+    assert package["pip_refuses"] == {filename: "requires Python >=3.8,<3.12"}
+    assert "note: 1 package is checked as uv installs it, though pip would refuse it" in result.err
+    path.write_text(dockerfile.format("pip install"), encoding="utf-8")
+    assert main(argv) == 1
+    package = json.loads(capsys.readouterr().out)["packages"][0]
+    assert package["results"] == {"linux-x86_64": "missing"}
+    assert "pip_refuses" not in package
 
 
 def test_cli_dockerfile_inputs_checks_what_the_image_installs(tmp_path, capsys, fake_pypi):
