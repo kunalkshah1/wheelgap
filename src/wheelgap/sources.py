@@ -7,7 +7,7 @@ import os
 import re
 import shlex
 import tomllib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from fnmatch import fnmatchcase
@@ -280,14 +280,60 @@ def pythons_outside_lock(source: Source, targets: Iterable[Target], *, bounds_on
 
 
 def uv_ignores_python_rejection(requires: str, python: str) -> bool:
-    """Whether the target misses only an explicit upper bound, using the index check's late-patch version."""
+    """Whether uv accepts a file that the index check rejected for this Python."""
+    # uv compares the lower edge of the complete release-only range:
+    # https://github.com/astral-sh/uv/blob/0.13.9/crates/uv-distribution-types/src/requires_python.rs#L246-L275
     try:
         spec = SpecifierSet(requires)
-        if any(clause.operator not in {"<", "<=", ">", ">=", "=="} or clause.version.endswith(".*") for clause in spec):
+        target = Version(f"{python}.99")
+        if spec.contains(target):
             return False
-        version = f"{python}.99"
-        lower = SpecifierSet(",".join(str(clause) for clause in spec if clause.operator not in {"<", "<="}))
-        return not spec.contains(version) and lower.contains(version)
+
+        # At equal versions an exclusive lower bound is higher than an inclusive one,
+        # so tuple comparison can pick the stricter bound.
+        lower: tuple[Version, bool] | None = None
+        upper: tuple[Version, bool] | None = None
+        exclusions: list[tuple[Version, Version | None]] = []
+        for clause in spec:
+            prefix = clause.version.endswith(".*")
+            version = Version(clause.version.removesuffix(".*"))
+            release = Version(version.base_version)
+            operator = clause.operator
+            successor = release
+            if prefix or operator == "~=":
+                segments = release.release if prefix else release.release[:-1]
+                successor = Version(".".join(map(str, (*segments[:-1], segments[-1] + 1))))
+                if prefix and version.epoch:
+                    successor = Version(f"{version.epoch}!{successor}")
+            if operator == "!=":
+                exclusions.append((release, successor if prefix else None))
+                continue
+            if operator in {">", ">=", "==", "===", "~="}:
+                candidate = (release, operator == ">")
+                lower = candidate if lower is None else max(lower, candidate)
+            if operator in {"<", "<=", "==", "===", "~="}:
+                candidate = (
+                    successor,
+                    operator in {"<=", "==", "==="} and not prefix,
+                )
+                upper = candidate if upper is None else min(upper, candidate)
+
+        if lower is None:
+            return True
+
+        for start, end in sorted(exclusions, key=lambda interval: interval[0]):
+            if start > lower[0]:
+                break
+            if end is None:
+                if start == lower[0]:
+                    lower = (start, True)
+            elif end > lower[0]:
+                lower = (end, False)
+
+        # uv treats an empty intersection as having no lower bound.
+        if upper is not None and (lower[0] > upper[0] or (lower[0] == upper[0] and (lower[1] or not upper[1]))):
+            return True
+        return lower <= (target, False)
     except (InvalidSpecifier, InvalidVersion):
         return False
 
@@ -2040,21 +2086,41 @@ def _constraint_error(entries: list[Package]) -> str | None:
     return None
 
 
-def parse_requirements(path: Path) -> Source:
+def parse_requirements(path: Path, constraint_paths: tuple[Path, ...] = ()) -> Source:
+    """`constraint_paths` are constraints files given beside the file (`pip install -r FILE -c CONSTRAINTS`): pip
+    reads them before FILE, so they count as a `-c CONSTRAINTS` line at the top of it would."""
     constraints: list[Package] = []
     seen: dict[bool, set[Path]] = {False: set(), True: set()}  # requirement files, constraint files
     index_options: list[str] = []
     format_control = _FormatControl()
     req_lines: list[str] = []
     compiler_signs: list[str] = []
-    pkgs = _read_requirements(
-        path,
-        seen,
-        constraints,
-        index_options=index_options,
-        format_control=format_control,
-        req_lines=req_lines,
-        compiler_signs=compiler_signs,
+    pkgs: list[Package] = []
+    for constraint_path in constraint_paths:
+        # What it returns is the requirements of a -r inside the constraints file (pip's rule): keep them, as
+        # _read_requirements does for a -c line.
+        pkgs.extend(
+            _read_requirements(
+                constraint_path,
+                seen,
+                constraints,
+                constraint=True,
+                index_options=index_options,
+                format_control=format_control,
+                req_lines=req_lines,
+                compiler_signs=compiler_signs,
+            )
+        )
+    pkgs.extend(
+        _read_requirements(
+            path,
+            seen,
+            constraints,
+            index_options=index_options,
+            format_control=format_control,
+            req_lines=req_lines,
+            compiler_signs=compiler_signs,
+        )
     )
     return _finalize_requirements(path, pkgs, constraints, index_options, format_control, req_lines, compiler_signs)
 
@@ -2957,10 +3023,18 @@ PARSERS = {
 }
 
 
-def load_file(path: Path, environment: str | None = None) -> Source:
-    """Read one input file. `environment` picks a pixi.lock environment (default: `default`)."""
+def load_file(path: Path, environment: str | None = None, constraint_paths: tuple[Path, ...] = ()) -> Source:
+    """Read one input file. `environment` picks a pixi.lock environment (default: `default`). `constraint_paths` are
+    the constraints files given beside a requirements file (see parse_requirements)."""
     kind = file_kind(path)
-    source = parse_pixi_lock(path, environment) if kind == "pixi" else READERS[kind](path)
+    if constraint_paths and kind != "requirements":
+        raise SourceError(f"{path.name}: constraints files (pip install -c) only apply to a requirements file")
+    if kind == "pixi":
+        source = parse_pixi_lock(path, environment)
+    elif constraint_paths:
+        source = parse_requirements(path, constraint_paths)
+    else:
+        source = READERS[kind](path)
     source.path, source.kind = path, kind
     _check_field_types(path, source)
     return source
@@ -3098,9 +3172,16 @@ def parse_dist(path: Path) -> Source:
     return Source(path.name, [pkg])
 
 
-def load_inputs(inputs: list[str], environment: str | None = None) -> list[Source]:
+def load_inputs(
+    inputs: list[str],
+    environment: str | None = None,
+    *,
+    requirements_constraints: Mapping[Path, tuple[Path, ...]] | None = None,
+) -> list[Source]:
     """Each input is a file, a directory (lockfile auto-detected) or a requirement like 'numpy==2.3.4'.
-    `environment` picks the pixi.lock environment; with no pixi.lock input it's an error."""
+    `environment` picks the pixi.lock environment; with no pixi.lock input it's an error.
+    `requirements_constraints` maps a requirements file among the inputs to the constraints files given beside it
+    (--dockerfile-inputs: `pip install -r FILE -c CONSTRAINTS`)."""
     if environment == "":
         raise SourceError("--environment needs a name")
     sources: list[Source] = []
@@ -3112,7 +3193,8 @@ def load_inputs(inputs: list[str], environment: str | None = None) -> list[Sourc
             if sources[-1].kind != "pixi" and (p / "pixi.lock").is_file():
                 sources[-1].passed_over = p / "pixi.lock"
         elif p.is_file():
-            sources.append(load_file(p, environment))
+            constraints = requirements_constraints.get(p, ()) if requirements_constraints is not None else ()
+            sources.append(load_file(p, environment, constraints))
         elif "/" in item or item.endswith((".lock", ".txt", ".toml", ".json", ".in", ".yml", ".yaml")):
             raise SourceError(f"{item}: no such file")
         else:

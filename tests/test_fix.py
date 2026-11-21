@@ -9,7 +9,7 @@ import pytest
 from packaging.requirements import Requirement
 from test_cli import _assert_matches_output_schema, run
 
-from wheelgap import cli, gapwheels, pypi
+from wheelgap import cache, cli, gapwheels, pypi
 from wheelgap.check import Row, Status
 from wheelgap.sources import Package, Source, load_inputs
 from wheelgap.targets import build_targets
@@ -247,6 +247,120 @@ def test_fix_hint_in_text_and_markdown_never_reads_the_list(capsys, fake_pypi, g
     code, out, _ = run(capsys, *NOWHEELS, "--markdown")
     assert code == 1 and out.rstrip().endswith(FIX_HINT)
     assert gap_wheels.calls == 0
+
+
+COUNTED_HINT = "Run with --fix: wheelgap's gap wheel index has a wheel for 1 of these gaps."
+
+
+def fix_hint_lines(out: str) -> list[str]:
+    return [line for line in out.splitlines() if line.startswith("Run with --fix")]
+
+
+def cache_gap_wheel_list(gap_wheels, *wheels: str, name: str = "nowheels", version: str = "0.9") -> None:
+    """Leave a gap wheel list with these wheels in the cache, as a --fix run would, and make any fetch after it fail:
+    a run without --fix must not make one (gap_wheels.calls counts them)."""
+    for wheel in wheels:
+        gap_wheels.add(name, version, wheel)
+    cache.save_gap_wheels(pypi.GAP_WHEELS_URL, gap_wheels.doc)
+    gap_wheels.doc = urllib.error.URLError("a run without --fix must never fetch the gap wheel list")
+
+
+@pytest.mark.parametrize("format_flags", [(), ("--markdown",)])
+@pytest.mark.parametrize(
+    ("list_state", "cache_flags", "expected"),
+    [
+        ("fitting", (), COUNTED_HINT),
+        ("other-platform", (), None),
+        ("absent", (), FIX_HINT),
+        ("fitting", ("--no-cache",), FIX_HINT),
+        ("other-platform", ("--no-cache",), FIX_HINT),
+        ("other-platform", ("--online",), FIX_HINT),
+    ],
+)
+def test_fix_hint_uses_only_the_cached_list(
+    capsys, fake_pypi, gap_wheels, format_flags, list_state, cache_flags, expected
+):
+    if list_state == "absent":
+        gap_wheels.doc = urllib.error.URLError("a run without --fix must never fetch the gap wheel list")
+    else:
+        other = "nowheels-0.9-cp314-cp314t-win_amd64.whl"
+        cache_gap_wheel_list(gap_wheels, FT_WHEEL if list_state == "fitting" else other)
+    _, out, _ = run(capsys, *NOWHEELS, *format_flags, *cache_flags)
+    assert fix_hint_lines(out) == ([expected] if expected else [])
+    assert gap_wheels.calls == 0
+
+
+def test_fix_hint_counts_the_cells_the_cached_list_fills(capsys, fake_pypi, gap_wheels):
+    cache_gap_wheel_list(gap_wheels, FT_WHEEL, "nowheels-0.9-cp314-cp314t-win_amd64.whl")
+    _, out, _ = run(capsys, "nowheels==0.9", "-p", "3.14t", "-t", "win-arm64,win-amd64,linux-x86_64")
+    assert fix_hint_lines(out) == ["Run with --fix: wheelgap's gap wheel index has a wheel for 2 of these gaps."]
+    assert gap_wheels.calls == 0
+
+
+def test_fix_hint_goes_back_to_the_plain_line_when_the_cached_list_is_too_old(
+    capsys, fake_pypi, gap_wheels, monkeypatch
+):
+    now = 1_700_000_000.0
+    monkeypatch.setattr(cache, "_now", lambda: now)
+    cache_gap_wheel_list(gap_wheels, "nowheels-0.9-cp314-cp314t-win_amd64.whl")  # fills nothing of this run
+    now += cache.GAP_WHEELS_MAX_AGE - 60
+    _, out, _ = run(capsys, *NOWHEELS)
+    assert fix_hint_lines(out) == []
+    now += 120  # past the list's hour: it says nothing about the index any more
+    _, out, _ = run(capsys, *NOWHEELS)
+    assert fix_hint_lines(out) == [FIX_HINT]
+    assert gap_wheels.calls == 0
+
+
+def test_fix_hint_goes_back_to_the_plain_line_when_the_cached_list_is_unusable(
+    capsys, fake_pypi, gap_wheels, lookup_cache
+):
+    cache_gap_wheel_list(gap_wheels, FT_WHEEL)
+    entries = list(lookup_cache.glob("*.json"))
+    assert entries
+    for entry in entries:
+        entry.write_bytes(b"not json")
+    _, out, _ = run(capsys, *NOWHEELS)
+    assert fix_hint_lines(out) == [FIX_HINT] and gap_wheels.calls == 0
+
+
+@pytest.mark.parametrize("flags", [("-q",), ("--json",), ("--index-url", "https://pkgs.example.com/simple")])
+def test_no_fix_hint_from_a_cached_list_where_the_plain_hint_is_omitted(
+    capsys, fake_pypi, fake_simple, gap_wheels, flags
+):
+    cache_gap_wheel_list(gap_wheels, FT_WHEEL)
+    _, out, _ = run(capsys, *NOWHEELS)
+    assert fix_hint_lines(out) == [COUNTED_HINT]
+    _, out, _ = run(capsys, *NOWHEELS, *flags)
+    assert "Run with --fix" not in out and gap_wheels.calls == 0
+
+
+def test_no_fix_hint_from_a_cached_list_when_offline(capsys, fixtures, gap_wheels):
+    # The uvproj lock records its files, so --offline can read it; the cached list fills puresdist's gap there.
+    lock = str(fixtures / "uvproj" / "uv.lock")
+    cache_gap_wheel_list(gap_wheels, "puresdist-1.0-cp314-cp314t-win_arm64.whl", name="puresdist", version="1.0")
+    _, out, _ = run(capsys, lock, "-p", "3.14t", "-t", "win-arm64")
+    assert fix_hint_lines(out) == [COUNTED_HINT]
+    _, out, _ = run(capsys, lock, "-p", "3.14t", "-t", "win-arm64", "--offline")
+    assert "Run with --fix" not in out and gap_wheels.calls == 0
+
+
+def test_no_fix_hint_from_a_cached_list_with_a_mirror(capsys, fake_pypi, gap_wheels, monkeypatch):
+    cache_gap_wheel_list(gap_wheels, FT_WHEEL)
+    monkeypatch.setenv("WHEELGAP_INDEX_URL", "https://mirror.example.com/pypi")
+    _, out, _ = run(capsys, *NOWHEELS)
+    assert "Run with --fix" not in out and gap_wheels.calls == 0
+
+
+def test_no_fix_hint_from_a_cached_list_for_a_no_binary_or_private_package(capsys, fake_pypi, gap_wheels, tmp_path):
+    cache_gap_wheel_list(gap_wheels, FT_WHEEL)
+    req = tmp_path / "requirements.txt"
+    req.write_text("--no-binary nowheels\nnowheels==0.9\n", encoding="utf-8")
+    _, out, _ = run(capsys, str(req), "-p", "3.14t", "-t", "win-arm64")
+    assert "Run with --fix" not in out
+    (tmp_path / "uv.lock").write_text(uv_lock("https://pkgs.example.com/simple"), encoding="utf-8")
+    _, out, _ = run(capsys, str(tmp_path / "uv.lock"), "-p", "3.14t", "-t", "win-arm64", "--markdown")
+    assert "Run with --fix" not in out and gap_wheels.calls == 0
 
 
 @pytest.mark.parametrize("flags", [("--fix",), ("-q",), ("--json",)])

@@ -3292,6 +3292,108 @@ def test_github_annotations_fail_on_missing_mixes_levels(capsys, fake_pypi, fixt
     ]
 
 
+@pytest.fixture
+def dockerfile_provenance_inputs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    Path("Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.13-slim\n"
+        "WORKDIR /app\n"
+        "COPY requirements.txt second.txt ./\n"
+        "RUN pip install -r requirements.txt\n"
+        "RUN pip install -r second.txt\n",
+        encoding="utf-8",
+    )
+    Path("requirements.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    Path("second.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("flags", [(), ("--markdown",)])
+def test_dockerfile_input_provenance_in_report_headers(capsys, fake_pypi, dockerfile_provenance_inputs, flags):
+    code, out, err = run(capsys, "--dockerfile", "Dockerfile", "--dockerfile-inputs", *flags)
+    assert code == 1
+    assert "requirements.txt (Dockerfile:4)" in out
+    assert "second.txt (Dockerfile:5)" in out
+    assert "Dockerfile:4: RUN pip install -r reads requirements.txt" in err
+    assert "Dockerfile:5: RUN pip install -r reads second.txt" in err
+
+
+def test_dockerfile_input_provenance_in_json_and_annotations(capsys, fake_pypi, dockerfile_provenance_inputs):
+    code, out, err = run(capsys, "--dockerfile", "Dockerfile", "--dockerfile-inputs", "--json", "--github-annotations")
+    assert code == 1
+    report = json.loads(out)
+    _assert_matches_output_schema(report)
+    assert report["sources"] == ["requirements.txt", "second.txt"]
+    assert report["dockerfile_inputs"] == [
+        {"dockerfile": "Dockerfile", "line": 4, "file": "requirements.txt"},
+        {"dockerfile": "Dockerfile", "line": 5, "file": "second.txt"},
+    ]
+    assert "::error file=requirements.txt,line=1," in err
+    assert "nowheels 0.9 builds from source on linux-x86_64 (installed by Dockerfile:4)." in err
+    assert "::error file=second.txt,line=1," in err
+    assert "psycopg2 2.9.11 builds from source on linux-x86_64 (installed by Dockerfile:5)." in err
+
+
+def test_dockerfile_input_provenance_names_the_line_a_continued_run_starts_on(capsys, fake_pypi, tmp_path, monkeypatch):
+    # Docker numbers an instruction by the line it starts on; the -r here is three lines further down, and the
+    # Dockerfile sits in a folder of its own, with the build context given.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    Path("docker").mkdir()
+    Path("docker/Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.13-slim\n"
+        "WORKDIR /app\n"
+        "COPY requirements.txt ./\n"
+        "RUN apt-get update \\\n"
+        "    && apt-get install -y gcc\n"
+        "RUN pip install \\\n"
+        "    # the pinned set\n"
+        "    --no-cache-dir \\\n"
+        "    -r requirements.txt\n",
+        encoding="utf-8",
+    )
+    Path("requirements.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    args = ["--dockerfile", "docker/Dockerfile", "--dockerfile-inputs", "--dockerfile-context", "."]
+    code, out, err = run(capsys, *args)
+    assert code == 1 and " · requirements.txt (docker/Dockerfile:6) · 1 package · Python 3.13\n" in out
+    assert "docker/Dockerfile:6: RUN pip install -r reads requirements.txt" in err
+    code, out, err = run(capsys, *args, "--json", "--github-annotations")
+    report = json.loads(out)
+    _assert_matches_output_schema(report)
+    assert report["sources"] == ["requirements.txt"]
+    assert report["dockerfile_inputs"] == [{"dockerfile": "docker/Dockerfile", "line": 6, "file": "requirements.txt"}]
+    assert "::error file=requirements.txt,line=1," in err
+    assert "nowheels 0.9 builds from source on linux-x86_64 (installed by docker/Dockerfile:6)." in err
+
+
+def test_dockerfile_inputs_file_is_relative_to_the_build_context(capsys, fake_pypi, tmp_path, monkeypatch):
+    # The Dockerfile's folder is the build context, given or not, and absolute or not: `file` is the same.
+    monkeypatch.chdir(tmp_path)
+    Path("docker/reqs").mkdir(parents=True)
+    Path("docker/Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.13-slim\nWORKDIR /app\nCOPY reqs/base.txt ./\n"
+        "RUN pip install -r base.txt\n",
+        encoding="utf-8",
+    )
+    Path("docker/reqs/base.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    for context in ([], ["--dockerfile-context", str(tmp_path / "docker")]):
+        _, out, _ = run(capsys, "--dockerfile", "docker/Dockerfile", "--dockerfile-inputs", "--json", *context)
+        report = json.loads(out)
+        _assert_matches_output_schema(report)
+        assert report["dockerfile_inputs"] == [{"dockerfile": "docker/Dockerfile", "line": 4, "file": "reqs/base.txt"}]
+
+
+def test_no_dockerfile_inputs_key_without_the_flag(capsys, fake_pypi, dockerfile_provenance_inputs):
+    _, out, err = run(capsys, "requirements.txt", "--dockerfile", "Dockerfile", "--json", "--github-annotations")
+    assert "dockerfile_inputs" not in json.loads(out) and "installed by" not in err
+
+
+@pytest.mark.parametrize("flags", [(), ("--markdown",), ("--json",), ("--github-annotations",)])
+def test_plain_dockerfile_run_has_no_install_provenance(capsys, fake_pypi, dockerfile_provenance_inputs, flags):
+    plain = run(capsys, "requirements.txt", "-p", "3.13", "-t", "linux-x86_64", *flags)
+    assert run(capsys, "requirements.txt", "--dockerfile", "Dockerfile", *flags) == plain
+
+
 def test_github_annotations_advisory_targets_are_warnings(capsys, fake_pypi, fixtures, monkeypatch):
     # A package whose gaps are all on --advisory targets doesn't fail the run, so it's a warning that says why;
     # advisory targets are marked in every message.
@@ -5292,13 +5394,14 @@ def test_offline_locked_package_python_range_unrestricted(capsys, tmp_path, fake
 
 
 @pytest.mark.parametrize("lockname", ["uv.lock", "app.py.lock"])
-def test_uv_lock_online_ignores_python_upper_bound(capsys, tmp_path, fake_pypi, monkeypatch, lockname):
+@pytest.mark.parametrize("requires_python", [">=3.10,<3.15", "==3.14.*", "~=3.14.0", ">=3.10,!=3.15.*"])
+def test_uv_lock_online_uses_python_lower_bound(capsys, tmp_path, fake_pypi, monkeypatch, lockname, requires_python):
     from conftest import FAKE_INDEX
 
     from wheelgap import check_lockfile, make_targets
 
     filename = "purewheel-3.1-py3-none-any.whl"
-    monkeypatch.setitem(FAKE_INDEX, "purewheel", {"3.1": [{"filename": filename, "requires_python": ">=3.10,<3.15"}]})
+    monkeypatch.setitem(FAKE_INDEX, "purewheel", {"3.1": [{"filename": filename, "requires_python": requires_python}]})
     lock = tmp_path / lockname
     manifest = '[manifest]\nrequirements = [{ name = "purewheel" }]\n' if lockname.endswith(".py.lock") else ""
     lock.write_text(
@@ -5314,11 +5417,11 @@ def test_uv_lock_online_ignores_python_upper_bound(capsys, tmp_path, fake_pypi, 
     _assert_matches_output_schema(json.loads(out))
     package = json.loads(out)["packages"][0]
     assert package["results"] == {"linux-x86_64": "wheel"}
-    assert package["pip_refuses"] == {filename: "requires Python >=3.10,<3.15"}
+    assert package["pip_refuses"] == {filename: f"requires Python {requires_python}"}
     assert "note: 1 package is checked as uv installs it, though pip would refuse it" in err
     assert (
-        "purewheel 3.1 on linux-x86_64: checked as uv installs it (uv ignores Requires-Python upper bounds); "
-        "pip refuses it: requires Python >=3.10,<3.15"
+        "purewheel 3.1 on linux-x86_64: checked as uv installs it (uv checks the Requires-Python lower bound); "
+        f"pip refuses it: requires Python {requires_python}"
     ) in run(capsys, *args, "--online", "--explain")[1]
     targets = make_targets("3.15", "linux-x86_64")
     result = check_lockfile(lock, targets, online=True)[0]
@@ -5364,13 +5467,36 @@ def test_uv_lock_online_python_upper_bound_is_per_python(capsys, tmp_path, fake_
         ("<=3.14", "3.15", True),
         ("<3.15", "3.14", False),
         (">=3.10,<3.15", "3.9", False),
-        ("==3.14.*,<3.15", "3.15", False),
-        ("~=3.13.0,<3.15", "3.15", False),
-        ("!=3.15.*,<3.15", "3.15", False),
+        ("==3.14.*", "3.15", True),
+        ("==3.16.*", "3.15", False),
+        (">=3.16", "3.15", False),
+        ("==3.14.*,<3.15", "3.15", True),
+        ("~=3.14.0", "3.15", True),
+        ("~=3.16.0", "3.15", False),
+        ("~=3.13.0,<3.15", "3.15", True),
+        ("!=3.15.*", "3.15", True),
+        ("!=3.15.*,<3.15", "3.15", True),
+        (">=3.10,!=3.15.*", "3.15", True),
+        (">=3.15,!=3.15.*", "3.15", False),
+        (">=3.14,!=3.14.*,!=3.15.*", "3.15", False),
+        (">=3.14,!=3.14.*,<3.16", "3.15", False),
+        (">=3.15.99,!=3.15.99", "3.15", False),
+        (">=3.16,<3.12", "3.15", True),
+        ("==3.14,!=3.14", "3.15", True),
+        # Checked against uv 0.13.9 itself (uv pip install --dry-run on wheels with these Requires-Python).
+        ("==3.14.*", "3.13", False),
+        ("~=3.14.0", "3.13", False),
+        ("~=3.13.0", "3.15", True),
+        ("==3.14", "3.15", True),
+        ("===3.14", "3.15", True),
+        ("==3.15.0", "3.15", True),
+        # pip takes these, so there is nothing for uv to restore.
+        (">=3.10,!=3.15.*", "3.14", False),
+        ("!=3.15.*", "3.14", False),
         ("invalid", "3.15", False),
     ],
 )
-def test_uv_ignores_only_explicit_python_upper_bounds(requires, python, ignores):
+def test_uv_ignores_python_rejection_when_lower_bound_allows(requires, python, ignores):
     from wheelgap.sources import uv_ignores_python_rejection
 
     assert uv_ignores_python_rejection(requires, python) is ignores

@@ -73,7 +73,9 @@ installs with `RUN pip install -r FILE`, on the image's Python and platform, so 
 compiling anything?" is one command (add `--deps` for what they pull in). `FILE` is followed back through `WORKDIR` and
 `COPY` to a file in the build context, taken to be the Dockerfile's folder unless
 [`--dockerfile-context DIR`](#dockerfile-context) names another, and each one gets a note on stderr
-(`Dockerfile:4: RUN pip install -r reads requirements.txt`). `[tool.wheelgap]` and `.python-version` are read from
+(`Dockerfile:4: RUN pip install -r reads requirements.txt`). After 0.13.0 the report says it too: in the header
+(`requirements.txt (Dockerfile:4)`), in `--json`'s [`dockerfile_inputs`](output.md#json) and in each
+`--github-annotations` message. `[tool.wheelgap]` and `.python-version` are read from
 that folder too. Only a strict subset is read:
 
 - a final stage built `FROM` an image, not an earlier stage;
@@ -81,19 +83,45 @@ that folder too. Only a strict subset is read:
 - plain `COPY SRC... DEST` from the build context (`--chown`, `--chmod` and `--link` are fine);
 - `RUN` lines that are exactly `pip install -r FILE` or `python -m pip install -r FILE` (`--no-cache-dir` is fine),
   or only system package commands joined by `&&` (`apt-get`, `apt`, `apk`, `yum`, `dnf`, `microdnf`, adding users
-  and groups, `mkdir`, `chown`, `chmod`, and `rm` under `/var/lib/apt/lists/`, `/var/cache/` or `/root/.cache/`).
+  and groups, `mkdir`, `chown`, `chmod`, and `rm` under `/var/lib/apt/lists/`, `/var/cache/` or `/root/.cache/`);
+- on that `pip install` line, **after 0.13.0**: flags that don't change which files pip picks (`--upgrade` / `-U`,
+  `--disable-pip-version-check`, `--root-user-action ignore` or `=ignore` (or `warn`), `--no-input`, `-q` /
+  `--quiet`);
+- `-c FILE` / `--constraint FILE` on that line, **after 0.13.0**: the constraints file is followed back through
+  `WORKDIR` and `COPY` like `-r FILE`, with the same refusals, and applied to the line's requirements files as a
+  `-c FILE` line at the top of each would be (the note on stderr names it too). A requirements file installed twice
+  with different `-c` files is an error;
+- `--prefer-binary` on that line, **after 0.13.0**, only when every requirement the line installs is pinned with
+  `==` (in `FILE`, in the files it includes, and in a `-r` inside a `-c` file; a requirement that a constraint pins
+  with `==` counts) and `--deps` isn't used: otherwise pip may take an older release that has a wheel over a newer
+  one that has none, while wheelgap checks the newest. Any other `pip install` flag (`--no-deps`, `--pre`, `--index-url`,
+  `--only-binary`, `--user`, `--target`, `-e`, combined short flags such as `-Uq`, `--requirement=FILE`) is still an
+  error.
 
 Anything else in the final stage is an error naming its line, since it may change what pip installs or what `FILE`
 holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount`, a heredoc, `uv pip`), `ADD`,
 `COPY --from`, globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a COPY that puts a file named
 `pip.conf` or `pip.ini` anywhere in the image, a `# syntax=` frontend other than
 `docker/dockerfile` (one pinned by digest, `docker/dockerfile:1@sha256:…`, is read when the Dockerfile has no
-heredoc), or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile` reads only the image.
+heredoc). Without this flag, `--dockerfile` reads only the image.
+
+A `-r` or `-c` inside `FILE` (and inside the file it names, and so on) is an error in 0.13.0. **After 0.13.0** it is
+followed when the included file is in the image where pip looks for it, and the same holds inside a constraints file
+named with `-c FILE` on the `RUN` line, where a `-r` adds requirements (their packages are checked) and a `-c` adds
+constraints, as pip reads them. pip reads an include beside the including file *in the image*, so wheelgap finds the
+`COPY` that puts a file at that path and reads it only if it is the same file as the one beside the including file in
+the build context; the note on stderr then names every file read
+(`Dockerfile:4: RUN pip install -r reads requirements.txt, base.txt, -c constraints.txt (which includes pins.txt)`).
+An include that no `COPY` puts there (pip would stop the build), one where a `COPY` puts a different file, a URL, a
+`${VAR}`, an absolute path, an abbreviated option (`--req`), an include on a line with an editable, or a symlink
+anywhere in the chain is still an error naming the `RUN` line.
 
 A `.dockerignore` is read as BuildKit reads it (**after 0.13.0**; 0.13.0 refuses any project that has one):
 `<Dockerfile name>.dockerignore` beside the Dockerfile if there is one, otherwise `.dockerignore` at the root of the
-build context. A requirements file that the rules leave out of the context is an error naming its `COPY` line and the
-rule, since the build would fail there. A pattern wheelgap can't read exactly as Docker does is an error naming the
+build context. A requirements or constraints file that the rules leave out of the context, or a file one of them
+includes with `-r` or `-c`, is an error naming its `COPY` line and the rule: the image doesn't have it, so the build
+would fail there, and wheelgap doesn't read it from disk. That holds for a file a folder `COPY` (`COPY . .`) would
+have brought, and for one a `COPY` names itself, which Docker then doesn't find. A pattern wheelgap can't read exactly as Docker does is an error naming the
 ignore file's line: one Docker rejects, a `\` escape before a letter or digit, any `\` on Windows (where Docker reads
 it as a path separator), or an empty `<Dockerfile name>.dockerignore` next to a `.dockerignore` with rules (which of
 the two Docker then uses depends on the Dockerfile frontend).
