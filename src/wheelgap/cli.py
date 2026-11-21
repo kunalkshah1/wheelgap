@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import platform
@@ -332,7 +333,7 @@ def make_parser() -> argparse.ArgumentParser:
         "--fix",
         action="store_true",
         help="also say which gaps a wheel on wheelgap's gap wheel index fills, and how to install from it (reads "
-        "the index's list from wheelgap.github.io, which sends no package names, and keeps it in the 24-hour cache; "
+        "the index's list from wheelgap.github.io, which sends no package names, and keeps it in the 1-hour cache; "
         "not with --offline, and off with --index-url or a WHEELGAP_INDEX_URL mirror)",
     )
     p.add_argument(
@@ -837,7 +838,7 @@ def render_explain(
     """`conda_forge`: --conda-forge hints, `piwheels`: --piwheels hints, `build_info`: --build-info answers and
     `suggestions`: --suggest's, by id() of the row's package. `notes` and `builds` (the tracker's build lab results):
     --notes, by id() of the row. `published_wheels`: --fix's fills (from the gap wheel list, which may come from the
-    24-hour cache), shown once per release under its first filled target."""
+    1-hour cache), shown once per release under its first filled target."""
     multi_py = len({t.python for t in targets}) > 1
     filled: dict[int, list[gapwheels.Fill]] = {}
     for fill in published_wheels or []:
@@ -1676,7 +1677,9 @@ def gap_wheel_fills(
 ) -> list[gapwheels.Fill]:
     """--fix: the gap cells a wheel on wheelgap's gap wheel index fills. The list is read in one request that names no
     package, only when a gap of a package that is positively PyPI's could use it (gapwheels.eligible), and never when
-    packages come from another index. Notes on stderr say when it wasn't read, couldn't be, or nothing fits."""
+    packages come from another index. A cached list (cache.GAP_WHEELS_MAX_AGE) answers only when it fills at least one
+    of this run's gaps: before saying none fits, the list is fetched once more, since new wheels are published most
+    days. Notes on stderr say when it wasn't read, couldn't be (or couldn't be refreshed), or nothing fits."""
     other = origin.other_index(index_url)
     if other is not None:
         if not quiet:
@@ -1704,12 +1707,30 @@ def gap_wheel_fills(
         )
     fills: list[gapwheels.Fill] = []
     if wanted:
-        wheels = gapwheels.look_up(read_cache=read_cache, write_cache=write_cache)
-        if wheels is None:
+        cached_wheels: list[gapwheels.GapWheel] | None = None
+        saved_time: float | None = None
+        if read_cache:
+            cached_wheels, saved_time = gapwheels.look_up_cached()
+            if cached_wheels is not None:
+                fills = gapwheels.fillable(wanted, targets, source_of, cached_wheels, private, index_url)
+                if fills:
+                    return fills
+        live_wheels = gapwheels.fetch(write_cache=write_cache)
+        if live_wheels is None:
+            if cached_wheels is not None and saved_time is not None:
+                # Even with -q, like the note below: the index may have a wheel this older list lacks, and without
+                # the note a run that couldn't ask it would read as "no gap wheel fits".
+                time_str = datetime.datetime.fromtimestamp(saved_time, datetime.UTC).strftime("%H:%M UTC")
+                print(
+                    f"wheelgap: note: --fix: no wheel on the gap wheel list fetched at {time_str} "
+                    "fills these gaps; the list couldn't be refreshed",
+                    file=sys.stderr,
+                )
+                return []
             # Even with -q: without it, a run that couldn't look would read as "no gap wheel fits".
             print("wheelgap: note: couldn't read the gap wheel list, so --fix has no suggestions", file=sys.stderr)
             return []
-        fills = gapwheels.fillable(wanted, targets, source_of, wheels, private, index_url)
+        fills = gapwheels.fillable(wanted, targets, source_of, live_wheels, private, index_url)
         if not fills and not quiet:
             print("wheelgap: note: --fix: no wheel on the gap wheel index fills these gaps", file=sys.stderr)
     return fills

@@ -418,8 +418,9 @@ nowheels 0.9 on win-arm64: ● source
     pip install --extra-index-url https://wheelgap.github.io/wheels/simple/ nowheels==0.9
 ```
 
-The gap wheel list is read once and kept in the 24-hour [cache](how-it-works.md#cache) (only a list with at least one
-usable entry), with or without `--explain`; `--no-cache` neither reads nor saves it.
+The gap wheel list is read once and kept in the [cache](how-it-works.md#cache) for an hour (only a list with at least
+one usable entry), with or without `--explain`; `--no-cache` neither reads nor saves it. A cached list that fills none
+of the run's gaps is read again before wheelgap says no wheel fits.
 
 With `--json --fix`, the top-level `gap_wheels` list has one object per filled cell: `name`, `version`, `target` (the
 target label), `wheel` (its filename), `url` (where to download it) and `sha256`. It's `[]` when nothing fits, when
