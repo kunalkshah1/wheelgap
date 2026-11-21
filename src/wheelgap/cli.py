@@ -1300,7 +1300,7 @@ def render_markdown(
     dropped: dict[str, str] | None = None,
     issues_urls: dict[int, str | None] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
-    fix_hint: bool = False,
+    fix_hint: str | None = None,
 ) -> list[str]:
     """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment)."""
     plain = Style(False)
@@ -1397,7 +1397,7 @@ def render_markdown(
             if sug_lines:
                 out += [*sug_lines, ""]
     if fix_hint:
-        out += [FIX_HINT, ""]
+        out += [fix_hint, ""]
     return out
 
 
@@ -2549,14 +2549,15 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         if args.fix
         else None
     )
-    fix_hint = (
-        not args.fix
-        and not args.json
-        and not quiet
-        and not offline
-        and origin.other_index(index_url) is None
-        and bool(gap_wheel_candidates(gaps, targets, sources, index_url)[1])
-    )
+    fix_hint = None
+    if not (args.fix or args.json or quiet or offline) and origin.other_index(index_url) is None:
+        _, hint_rows, source_of, private = gap_wheel_candidates(gaps, targets, sources, index_url)
+        if hint_rows:
+            wheels = gapwheels.cached_list() if cached["read_cache"] else None
+            if wheels is None:
+                fix_hint = FIX_HINT
+            elif count := len(gapwheels.fillable(hint_rows, targets, source_of, wheels, private, index_url)):
+                fix_hint = f"Run with --fix: wheelgap's gap wheel index has a wheel for {count} of these."
 
     if args.print_gap_wheel_snippet:  # one input of gapwheels.SNIPPET_KINDS, checked when it was read
         multi_py = len({t.python for t in targets}) > 1
@@ -2783,7 +2784,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     if not args.explain:
         print(style.dim("Run with --explain to see which wheels were rejected and why."))
     if fix_hint:
-        print(style.dim(FIX_HINT))
+        print(style.dim(fix_hint))
     if source_allowed and not args.exit_zero:
         print(style.dim("Source builds are allowed (--fail-on missing), so this run passes."))
     for ln in fix_lines:  # a gap wheel fills only a gap, so the runs that return early above have none

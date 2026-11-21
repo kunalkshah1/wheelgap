@@ -9,7 +9,7 @@ import pytest
 from packaging.requirements import Requirement
 from test_cli import _assert_matches_output_schema, run
 
-from wheelgap import cli, gapwheels, pypi
+from wheelgap import cache, cli, gapwheels, pypi
 from wheelgap.check import Row, Status
 from wheelgap.sources import Package, Source, load_inputs
 from wheelgap.targets import build_targets
@@ -247,6 +247,32 @@ def test_fix_hint_in_text_and_markdown_never_reads_the_list(capsys, fake_pypi, g
     code, out, _ = run(capsys, *NOWHEELS, "--markdown")
     assert code == 1 and out.rstrip().endswith(FIX_HINT)
     assert gap_wheels.calls == 0
+
+
+@pytest.mark.parametrize("format_flags", [(), ("--markdown",)])
+@pytest.mark.parametrize(
+    ("list_state", "cache_flags", "expected"),
+    [
+        ("fitting", (), "Run with --fix: wheelgap's gap wheel index has a wheel for 1 of these."),
+        ("other-platform", (), None),
+        ("absent", (), FIX_HINT),
+        ("other-platform", ("--no-cache",), FIX_HINT),
+        ("other-platform", ("--online",), FIX_HINT),
+    ],
+)
+def test_fix_hint_uses_only_the_cached_list(
+    capsys, fake_pypi, gap_wheels, monkeypatch, format_flags, list_state, cache_flags, expected
+):
+    def unexpected_fetch():
+        pytest.fail("printing the hint must never fetch the gap wheel list")
+
+    monkeypatch.setattr(pypi, "fetch_gap_wheels", unexpected_fetch)
+    if list_state != "absent":
+        wheel = FT_WHEEL if list_state == "fitting" else "nowheels-0.9-cp314-cp314t-win_amd64.whl"
+        gap_wheels.add("nowheels", "0.9", wheel)
+        cache.save_gap_wheels(pypi.GAP_WHEELS_URL, gap_wheels.doc)
+    _, out, _ = run(capsys, *NOWHEELS, *format_flags, *cache_flags)
+    assert [line for line in out.splitlines() if line.startswith("Run with --fix")] == ([expected] if expected else [])
 
 
 @pytest.mark.parametrize("flags", [("--fix",), ("-q",), ("--json",)])

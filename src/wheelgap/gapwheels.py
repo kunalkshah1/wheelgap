@@ -101,13 +101,16 @@ def parse(data: object) -> list[GapWheel] | None:
     return [w for w in map(_entry, data["wheels"]) if w is not None]
 
 
+def cached_list() -> list[GapWheel] | None:
+    """Read the last usable gap wheel list from disk without fetching it."""
+    return parse(cache.load_gap_wheels(pypi.GAP_WHEELS_URL)) or None
+
+
 def look_up(*, read_cache: bool = True, write_cache: bool = True) -> list[GapWheel] | None:
     """The gap wheel list, or None if it couldn't be fetched or read. A list parse() accepts with at least one usable
     entry is kept in the 24-hour cache (--no-cache: neither read nor saved; --online: fetched again, then saved)."""
-    if read_cache:
-        cached = cache.load_gap_wheels(pypi.GAP_WHEELS_URL)
-        if cached is not None and (wheels := parse(cached)):  # as saved: a list with a usable entry
-            return wheels
+    if read_cache and (wheels := cached_list()) is not None:
+        return wheels
     try:
         data = pypi.fetch_gap_wheels()
     except Exception:  # unreachable, a timeout, an HTTP error, a body that isn't JSON or is too big...
