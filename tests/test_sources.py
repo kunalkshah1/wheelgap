@@ -407,6 +407,131 @@ def test_requirements_include_diamond_lists_packages_once(tmp_path):
     ]
 
 
+def _try_symlink(target: Path, link: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks aren't available here")
+
+
+def test_requirements_symlinked_file_include_reads_from_the_links_folder(tmp_path):
+    # The issue's layout: link/reqs.txt points into real/, and both folders have a base.txt. pip
+    # resolves -r base.txt against the folder of the file as named, so it reads link/base.txt (#604).
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").mkdir()
+    (tmp_path / "real" / "reqs.txt").write_text("-r base.txt\n", encoding="utf-8")
+    (tmp_path / "real" / "base.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+    (tmp_path / "link" / "base.txt").write_text("idna==3.11\n", encoding="utf-8")
+    _try_symlink(Path("../real/reqs.txt"), tmp_path / "link" / "reqs.txt")
+    assert [(p.name, p.version) for p in parse_requirements(tmp_path / "link" / "reqs.txt").packages] == [
+        ("idna", "3.11")
+    ]
+
+
+def test_requirements_symlinked_folder_include_reads_from_the_links_folder(tmp_path):
+    # The requirements file sits in a symlinked folder, and its include climbs out of it: pip joins
+    # -r ../base.txt onto the folder as named (a/link), so it reads a/base.txt, not base.txt (#604).
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "reqs.txt").write_text("-r ../base.txt\n", encoding="utf-8")
+    (tmp_path / "a" / "base.txt").write_text("idna==3.11\n", encoding="utf-8")
+    (tmp_path / "base.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+    _try_symlink(Path("../b"), tmp_path / "a" / "link")
+    assert [(p.name, p.version) for p in parse_requirements(tmp_path / "a" / "link" / "reqs.txt").packages] == [
+        ("idna", "3.11")
+    ]
+
+
+def test_requirements_symlinked_constraints_file_include_reads_from_the_links_folder(tmp_path):
+    # A -c inside a symlinked constraints file resolves against the link's folder too: the constraint
+    # comes from link/base.txt, not real/base.txt (#604).
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").mkdir()
+    (tmp_path / "top.txt").write_text("idna\n-c link/cons.txt\n", encoding="utf-8")
+    (tmp_path / "real" / "cons.txt").write_text("-c base.txt\n", encoding="utf-8")
+    (tmp_path / "real" / "base.txt").write_text("idna==2.0\n", encoding="utf-8")
+    (tmp_path / "link" / "base.txt").write_text("idna==3.11\n", encoding="utf-8")
+    _try_symlink(Path("../real/cons.txt"), tmp_path / "link" / "cons.txt")
+    (pkg,) = parse_requirements(tmp_path / "top.txt").packages
+    assert (pkg.name, pkg.version) == ("idna", "3.11")
+
+
+def test_requirements_symlinked_file_missing_include_names_the_path_pip_would_open(tmp_path):
+    # The link's own folder has no base.txt, so pip fails opening link/base.txt: the error names that
+    # path, not the one the link points into (#604).
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").mkdir()
+    (tmp_path / "real" / "reqs.txt").write_text("-r base.txt\n", encoding="utf-8")
+    (tmp_path / "real" / "base.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+    _try_symlink(Path("../real/reqs.txt"), tmp_path / "link" / "reqs.txt")
+    with pytest.raises(FileNotFoundError) as caught:
+        parse_requirements(tmp_path / "link" / "reqs.txt")
+    # The filename, not str(error): that shows the path's repr, with doubled backslashes on Windows.
+    assert Path(caught.value.filename) == tmp_path / "link" / "base.txt"
+
+
+def test_requirements_file_reached_by_two_names_lists_packages_once(tmp_path):
+    # The same file included once by its own name and once through a link is still read once: the loop
+    # and "already read" identity is the resolved path, so its packages are listed once (#604).
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").mkdir()
+    path = tmp_path / "top.txt"
+    path.write_text("-r real/base.txt\n-r link/base.txt\n", encoding="utf-8")
+    (tmp_path / "real" / "base.txt").write_text("idna==3.11\n", encoding="utf-8")
+    _try_symlink(Path("../real/base.txt"), tmp_path / "link" / "base.txt")
+    assert [(p.name, p.version) for p in parse_requirements(path).packages] == [("idna", "3.11")]
+
+
+def test_requirements_shared_file_linked_into_two_folders_reads_each_folders_include(tmp_path):
+    # One shared file linked into two service folders, both included from one top file. The shared
+    # file's own line is listed once, but its -r base.txt is another file under each name, and pip
+    # reads both (checked with pip 26.3's parser): neither folder's packages may be dropped (#604).
+    for folder in ("shared", "a", "b"):
+        (tmp_path / folder).mkdir()
+    path = tmp_path / "top.txt"
+    path.write_text("-r a/reqs.txt\n-r b/reqs.txt\n", encoding="utf-8")
+    (tmp_path / "shared" / "reqs.txt").write_text("requests==2.32.5\n-r base.txt\n", encoding="utf-8")
+    (tmp_path / "a" / "base.txt").write_text("idna==3.11\n", encoding="utf-8")
+    (tmp_path / "b" / "base.txt").write_text("six==1.17.0\n", encoding="utf-8")
+    _try_symlink(Path("../shared/reqs.txt"), tmp_path / "a" / "reqs.txt")
+    _try_symlink(Path("../shared/reqs.txt"), tmp_path / "b" / "reqs.txt")
+    assert [(p.name, p.version) for p in parse_requirements(path).packages] == [
+        ("requests", "2.32.5"),
+        ("idna", "3.11"),
+        ("six", "1.17.0"),
+    ]
+
+
+def test_requirements_shared_file_on_the_chain_under_two_names_is_not_a_cycle(tmp_path):
+    # a/reqs.txt and b/reqs.txt are links to one shared file, and a's include leads to b's. The shared
+    # file is then being read under two names at once, but nothing includes itself: pip compares the
+    # names (os.path.abspath), reads on, and installs idna (checked with pip 26.3's parser) (#604).
+    for folder in ("shared", "a", "b"):
+        (tmp_path / folder).mkdir()
+    (tmp_path / "shared" / "reqs.txt").write_text("-r next.txt\n", encoding="utf-8")
+    (tmp_path / "a" / "next.txt").write_text("-r ../b/reqs.txt\n", encoding="utf-8")
+    (tmp_path / "b" / "next.txt").write_text("idna==3.11\n", encoding="utf-8")
+    _try_symlink(Path("../shared/reqs.txt"), tmp_path / "a" / "reqs.txt")
+    _try_symlink(Path("../shared/reqs.txt"), tmp_path / "b" / "reqs.txt")
+    assert [(p.name, p.version) for p in parse_requirements(tmp_path / "a" / "reqs.txt").packages] == [("idna", "3.11")]
+
+
+def test_requirements_include_cycle_through_a_symlink_is_an_error(tmp_path):
+    # A loop through a link is refused, and the chain names the files as they were written (#604).
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").mkdir()
+    path = tmp_path / "a.txt"
+    path.write_text("-r link/b.txt\n", encoding="utf-8")
+    (tmp_path / "real" / "b.txt").write_text("-r ../a.txt\n", encoding="utf-8")
+    _try_symlink(Path("../real/b.txt"), tmp_path / "link" / "b.txt")
+    with pytest.raises(SourceError) as caught:
+        parse_requirements(path)
+    assert str(caught.value) == (
+        "link/b.txt: -r ../a.txt includes a file that is already being read "
+        "(a.txt -> link/b.txt -> a.txt); pip refuses this"
+    )
+
+
 def test_requirements_constraint_inside_constraints_file_stays_a_constraint(tmp_path):
     path = tmp_path / "a.txt"
     path.write_text("ranged\n-c cons.txt\n", encoding="utf-8")
