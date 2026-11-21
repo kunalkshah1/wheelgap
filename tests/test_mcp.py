@@ -624,7 +624,7 @@ def test_check_lockfile_pixi_environment(fake_pypi, fixtures, environment):
     ("environment", "message"),
     [
         ("docs", "no environment 'docs' (it has: default, test)"),
-        ("", "--environment needs a name"),
+        ("", "the environment argument needs a name"),
         (42, "'environment' must be a string"),
         (["test"], "'environment' must be a string"),
     ],
