@@ -3265,6 +3265,54 @@ def test_github_annotations_fail_on_missing_mixes_levels(capsys, fake_pypi, fixt
     ]
 
 
+@pytest.fixture
+def dockerfile_provenance_inputs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    Path("Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.13-slim\n"
+        "WORKDIR /app\n"
+        "COPY requirements.txt second.txt ./\n"
+        "RUN pip install -r requirements.txt\n"
+        "RUN pip install -r second.txt\n",
+        encoding="utf-8",
+    )
+    Path("requirements.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    Path("second.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("flags", [(), ("--markdown",)])
+def test_dockerfile_input_provenance_in_report_headers(capsys, fake_pypi, dockerfile_provenance_inputs, flags):
+    code, out, err = run(capsys, "--dockerfile", "Dockerfile", "--dockerfile-inputs", *flags)
+    assert code == 1
+    assert "requirements.txt (Dockerfile:4)" in out
+    assert "second.txt (Dockerfile:5)" in out
+    assert "Dockerfile:4: RUN pip install -r reads requirements.txt" in err
+    assert "Dockerfile:5: RUN pip install -r reads second.txt" in err
+
+
+def test_dockerfile_input_provenance_in_json_and_annotations(capsys, fake_pypi, dockerfile_provenance_inputs):
+    code, out, err = run(capsys, "--dockerfile", "Dockerfile", "--dockerfile-inputs", "--json", "--github-annotations")
+    assert code == 1
+    report = json.loads(out)
+    _assert_matches_output_schema(report)
+    assert report["sources"] == ["requirements.txt", "second.txt"]
+    assert report["dockerfile_inputs"] == [
+        {"dockerfile": "Dockerfile", "line": 4, "file": "requirements.txt"},
+        {"dockerfile": "Dockerfile", "line": 5, "file": "second.txt"},
+    ]
+    assert "::error file=requirements.txt,line=1," in err
+    assert "nowheels 0.9 builds from source on linux-x86_64 (installed by Dockerfile:4)." in err
+    assert "::error file=second.txt,line=1," in err
+    assert "psycopg2 2.9.11 builds from source on linux-x86_64 (installed by Dockerfile:5)." in err
+
+
+@pytest.mark.parametrize("flags", [(), ("--markdown",), ("--json",), ("--github-annotations",)])
+def test_plain_dockerfile_run_has_no_install_provenance(capsys, fake_pypi, dockerfile_provenance_inputs, flags):
+    plain = run(capsys, "requirements.txt", "-p", "3.13", "-t", "linux-x86_64", *flags)
+    assert run(capsys, "requirements.txt", "--dockerfile", "Dockerfile", *flags) == plain
+
+
 def test_github_annotations_advisory_targets_are_warnings(capsys, fake_pypi, fixtures, monkeypatch):
     # A package whose gaps are all on --advisory targets doesn't fail the run, so it's a warning that says why;
     # advisory targets are marked in every message.

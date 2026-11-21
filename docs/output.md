@@ -23,6 +23,10 @@ Add `set -o pipefail` when you pipe the output, so input errors still fail.
 
 ## Text
 
+With `--dockerfile-inputs`, text and Markdown headers show the installing RUN line beside each input,
+such as `requirements.txt (Dockerfile:4)`. GitHub annotations stay on the requirements file and name
+the installing RUN in the message.
+
 ```text
 wheelgap 0.13.0 · uv.lock · 5 packages · Python 3.13
 
@@ -436,6 +440,9 @@ for inputs pip installs from as they are; a lockfile's entries have no `install`
 [`wheelgap-output.schema.json`](https://github.com/wheelgap/wheelgap/blob/main/docs/wheelgap-output.schema.json)
 (JSON Schema 2020-12), which matches the wheelgap version it ships with; later versions may add keys, so ignore any
 you don't know. Keys are never renamed or removed.
+
+With `--dockerfile-inputs`, the top-level `dockerfile_inputs` list has one entry per input file. Each entry
+names the `dockerfile` path, the one-based RUN `line`, and the input `file` path.
 
 `results`, `rejected` and `via` are all keyed by target label: just the platform (`"linux-x86_64"`) when one Python is
 checked, or Python and platform (`"3.13 linux-x86_64"`) with several. The top-level `targets` list gives each target's

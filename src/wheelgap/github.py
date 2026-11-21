@@ -16,6 +16,7 @@ import re
 import shlex
 import tomllib
 from bisect import bisect_right
+from collections.abc import Mapping
 from pathlib import Path
 
 from packaging.utils import canonicalize_name
@@ -350,6 +351,8 @@ def annotation(
     locator: Locator,
     advisory: frozenset[Target] = frozenset(),
     fills: list[gapwheels.Fill] | None = None,
+    *,
+    installed_by: str | None = None,
 ) -> str:
     multi_py = len({t.python for t in targets}) > 1
     by_status: dict[Status, list[str]] = {}
@@ -376,6 +379,8 @@ def annotation(
     message = f"{name} {'; '.join(parts)}"
     if names:
         message += f" (via {', '.join(names)}{'' if not any(rooted) else ' on some targets'})"
+    if installed_by is not None:
+        message += f" (installed by {installed_by})"
     message += "."
     if pkg.error:
         message += f" Lookup error: {pkg.error}."
@@ -413,6 +418,8 @@ def github_annotations(
     failing: list[Row],
     advisory: frozenset[Target] = frozenset(),
     fills: list[gapwheels.Fill] | None = None,
+    *,
+    installed_by: Mapping[int, str] | None = None,
 ) -> list[str]:
     """One ::error per failing package and one ::warning per package whose gaps don't fail the run (source builds
     that --fail-on missing allows, or gaps only on --advisory targets), at most ANNOTATION_LIMIT of each: past that,
@@ -427,7 +434,18 @@ def github_annotations(
     for level in ("error", "warning"):
         chosen = [r for r in rows if not r.ok and (id(r) in failing_ids) == (level == "error")]
         shown = chosen if len(chosen) <= ANNOTATION_LIMIT else chosen[: ANNOTATION_LIMIT - 1]
-        out += [annotation(r, targets, level, locator, advisory, filled.get(id(r))) for r in shown]
+        out += [
+            annotation(
+                r,
+                targets,
+                level,
+                locator,
+                advisory,
+                filled.get(id(r)),
+                installed_by=installed_by.get(id(r.package)) if installed_by is not None else None,
+            )
+            for r in shown
+        ]
         if more := len(chosen) - len(shown):
             what = f"{more} more packages with gaps"  # never 1: a single extra would fit in the limit
             out.append(workflow_command(level, f"{what}; the log lists them all.", title=f"wheelgap: {what}"))
