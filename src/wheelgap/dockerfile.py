@@ -1111,8 +1111,27 @@ def _system_command(args: str) -> bool:
     return True
 
 
+# `pip install` flags that don't change which files pip picks: read and ignored. Spelled out in full only, since pip
+# also takes any unambiguous prefix of a long option and wheelgap doesn't guess at those.
+_PIP_HARMLESS_FLAGS = (
+    "--no-cache-dir",
+    "--upgrade",
+    "-U",
+    "--disable-pip-version-check",
+    "--no-input",
+    "-q",
+    "--quiet",
+)
+_PIP_ROOT_USER_ACTIONS = ("warn", "ignore")  # pip's choices for --root-user-action; it exits on any other value
+_PIP_FLAGS_READ = (
+    "-r FILE, -c FILE, --no-cache-dir, --upgrade (-U), --disable-pip-version-check, --root-user-action, --no-input, "
+    "--quiet (-q) and, with pinned requirements, --prefer-binary"
+)
+
+
 def _pip_install_files(number: int, args: str) -> tuple[list[str], list[str], bool]:
-    """The FILEs of a RUN that is exactly `pip install -r FILE...` (or `python -m pip ...`)."""
+    """(the -r FILEs, the -c FILEs, whether --prefer-binary is given) of a RUN that is exactly
+    `pip install -r FILE...` (or `python -m pip ...`) with flags that don't change what pip picks."""
     unread = (
         "only `RUN pip install -r FILE` and system package commands (apt-get, apk, dnf...) are read by "
         "--dockerfile-inputs, and this RUN may change what pip installs"
@@ -1132,15 +1151,6 @@ def _pip_install_files(number: int, args: str) -> tuple[list[str], list[str], bo
         raise DockerfileError(f"line {number}: {unread}")
     if rest[:1] != ["install"]:
         raise DockerfileError(f"line {number}: {unread}")
-    harmless = {
-        "--no-cache-dir",
-        "--upgrade",
-        "-U",
-        "--disable-pip-version-check",
-        "--no-input",
-        "-q",
-        "--quiet",
-    }
     files: list[str] = []
     constraints: list[str] = []
     prefer_binary = False
@@ -1152,17 +1162,18 @@ def _pip_install_files(number: int, args: str) -> tuple[list[str], list[str], bo
         elif rest[i] in ("-c", "--constraint") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
             constraints.append(rest[i + 1])
             i += 2
-        elif rest[i] in harmless or rest[i].partition("=")[0] == "--root-user-action" and "=" in rest[i]:
+        elif rest[i] in _PIP_HARMLESS_FLAGS:
             i += 1
-        elif rest[i] == "--root-user-action" and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+        elif rest[i].startswith("--root-user-action=") and rest[i].partition("=")[2] in _PIP_ROOT_USER_ACTIONS:
+            i += 1
+        elif rest[i] == "--root-user-action" and rest[i + 1 : i + 2] and rest[i + 1] in _PIP_ROOT_USER_ACTIONS:
             i += 2
         elif rest[i] == "--prefer-binary":
             prefer_binary = True
             i += 1
         else:
             raise DockerfileError(
-                f"line {number}: pip install {rest[i]}: --dockerfile-inputs only reads -r FILE, -c FILE "
-                "and the documented install flags"
+                f"line {number}: pip install {rest[i]}: --dockerfile-inputs only reads {_PIP_FLAGS_READ}"
             )
     if not files:
         raise DockerfileError(f"line {number}: {unread}")
@@ -1182,12 +1193,13 @@ def dockerfile_requirements(
     FILE is followed back through the WORKDIR and COPY instructions before it to a file in the build context, taken
     to be the Dockerfile's folder (or `context` if given). Only a strict subset is read: a final stage built FROM an
     image (not an earlier stage), WORKDIR with a literal path, plain `COPY SRC... DEST` from the build context, and
-    RUN lines that are exactly `pip install -r FILE` (or `python -m pip install`, with the documented install flags) or
-    only system package commands (_SYSTEM_COMMANDS). Anything else that may change what pip installs or put FILE in
-    the image
-    (any other RUN, ADD, COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip config file, a
-    .dockerignore, a `# syntax=` frontend other than docker/dockerfile, a nested -r or -c) is a DockerfileError
-    naming its line, never a guess.
+    RUN lines that are exactly `pip install -r FILE` (or `python -m pip install`, with `-c FILE` and the flags in
+    _PIP_FLAGS_READ) or only system package commands (_SYSTEM_COMMANDS). `constraints`, if given, is filled with each
+    requirements file's `-c` files, to pass to load_inputs; `dependencies` says the check will follow dependencies
+    (--deps), which --prefer-binary then can't be read for. Anything else that may change what pip installs or put
+    FILE in the image (any other RUN, ADD, COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip
+    config file, a .dockerignore, a `# syntax=` frontend other than docker/dockerfile, a nested -r or -c) is a
+    DockerfileError naming its line, never a guess.
     """
     try:
         text = path.read_bytes().decode("utf-8-sig")
@@ -1268,6 +1280,7 @@ def _dockerfile_requirements(
     used_constraints: dict[Path, tuple[Path, ...]] = {}
 
     def copied_requirements(file: str, option: str) -> Path:
+        """The file in the build context that `-r FILE` or `-c FILE` on the RUN at `number` reads in the image."""
         if file.startswith("/"):
             target = posixpath.normpath(file)
         elif workdir is None:
@@ -1286,9 +1299,6 @@ def _dockerfile_requirements(
             raise DockerfileError(
                 f"line {number}: {target} isn't copied from the build context by a COPY before this line"
             )
-        relative = host.relative_to(context)
-        if any((context / part).is_symlink() for part in (relative, *relative.parents)):
-            raise DockerfileError(f"line {number}: {relative} is a symlink, which --dockerfile-inputs doesn't read")
         if _has_include(host.read_text(encoding="utf-8-sig", errors="replace")):
             raise DockerfileError(
                 f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
@@ -1321,18 +1331,26 @@ def _dockerfile_requirements(
             files, constraint_files, prefer_binary = _pip_install_files(number, args)
             if run_error:
                 raise DockerfileError(run_error)
-
             constraint_paths = tuple(copied_requirements(file, "-c") for file in constraint_files)
+            if constraint_paths and constraints is None:  # never read the requirements without their constraints
+                raise DockerfileError(f"line {number}: pip install -c FILE isn't read here")
             for file in files:
                 host = copied_requirements(file, "-r")
                 if prefer_binary and (
                     dependencies or any(not package.version for package in parse_requirements(host).packages)
                 ):
+                    # With it pip takes an older release that has a wheel over a newer one that has none, and
+                    # wheelgap checks the newest release a requirement allows: only a pin gives both the same one.
                     raise DockerfileError(
-                        f"line {number}: --prefer-binary can pick an older wheel and needs exact pins without --deps"
+                        f"line {number}: pip install --prefer-binary makes pip pick an older release that has a "
+                        f"wheel, so it's only read when every requirement in {host.name} is pinned with == "
+                        "and --deps isn't used"
                     )
                 if host in found and used_constraints[host] != constraint_paths:
-                    raise DockerfileError(f"line {number}: {host.name} is installed with different constraint files")
+                    raise DockerfileError(
+                        f"line {number}: {host.name} is installed again with other -c files than on line "
+                        f"{found[host]}, which --dockerfile-inputs doesn't read"
+                    )
                 used_constraints[host] = constraint_paths
                 found.setdefault(host, number)
             # An unread COPY or ADD before the one that copies FILE may still put a pip config file in the image.

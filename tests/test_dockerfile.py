@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -14,6 +15,7 @@ from wheelgap.dockerfile import (
     parse_from,
     read_dockerfile,
 )
+from wheelgap.sources import SourceError, load_inputs
 
 
 @pytest.mark.parametrize(
@@ -1199,6 +1201,8 @@ def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_
         "-U",
         "--disable-pip-version-check",
         "--root-user-action=ignore",
+        "--root-user-action=warn",
+        "--root-user-action ignore",
         "--root-user-action warn",
         "--no-input",
         "-q",
@@ -1208,50 +1212,201 @@ def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_
     ],
 )
 def test_dockerfile_requirements_pip_install_flags(tmp_path, flags):
-    path = _context(
-        tmp_path, f"FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install {flags} -r requirements.txt\n"
-    )
-    assert dockerfile_requirements(path) == [(4, tmp_path / "requirements.txt")]
+    # Before the file and after it: pip reads options anywhere on the line.
+    for install in (f"{flags} -r requirements.txt", f"-r requirements.txt {flags}"):
+        path = _context(tmp_path, f"FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install {install}\n")
+        assert dockerfile_requirements(path) == [(4, tmp_path / "requirements.txt")]
 
 
-@pytest.mark.parametrize("setting", ["--no-deps", "--index-url https://example.org", "--prefer-binary"])
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "--no-deps",
+        "--index-url https://example.org",
+        "--only-binary :all:",
+        "--prefer-binary",  # the file below isn't pinned
+        "--pre",
+        "--user",
+        "--target /opt/site",
+        "--upgrade-strategy eager",
+        "-e .",
+        # pip reads combined short flags, glued values, = forms and unambiguous prefixes; wheelgap reads none of them.
+        "-Uq",
+        "-qq",
+        "-Ur",
+        "--upgr",
+        "--requirement=requirements.txt",
+        "--constraint=constraints.txt",
+        "-cconstraints.txt",
+        "-c",
+        # pip exits on a value other than warn or ignore, and with no value the next word is the value.
+        "--root-user-action=never",
+        "--root-user-action never",
+        "--root-user-action",
+    ],
+)
 def test_dockerfile_requirements_refuses_install_flags_that_can_change_resolution(tmp_path, setting):
     path = _context(
-        tmp_path, f"FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt {setting}\n"
+        tmp_path,
+        f"FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt {setting}\n",
+        ["requirements.txt", "constraints.txt"],
     )
     (tmp_path / "requirements.txt").write_text("purewheel>=3\n", encoding="utf-8")
-    with pytest.raises(DockerfileError, match=rf":4: .*{setting.split()[0]}"):
-        dockerfile_requirements(path)
+    with pytest.raises(DockerfileError, match=rf":4: pip install {re.escape(setting.split()[0])}[ :]"):
+        dockerfile_requirements(path, constraints={})
     assert read_dockerfile(path).python == "3.13"
 
 
-@pytest.mark.parametrize("location", ["missing", "symlink", "copied"])
-def test_dockerfile_install_constraint_file(tmp_path, location, capsys, fake_pypi):
-    copy = "COPY requirements.txt ./" if location == "missing" else "COPY requirements.txt constraints.txt ./"
+def test_dockerfile_requirements_refused_flag_message_lists_what_is_read(tmp_path):
+    path = _context(
+        tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install --no-deps -r requirements.txt\n"
+    )
+    message = (
+        ":4: pip install --no-deps: --dockerfile-inputs only reads -r FILE, -c FILE, --no-cache-dir, "
+        r"--upgrade \(-U\), --disable-pip-version-check, --root-user-action, --no-input, --quiet \(-q\) and, "
+        "with pinned requirements, --prefer-binary"
+    )
+    with pytest.raises(DockerfileError, match=message):
+        dockerfile_requirements(path)
+
+
+def test_dockerfile_requirements_prefer_binary_needs_pins_and_no_deps(tmp_path, capsys, fake_pypi):
+    path = _context(
+        tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install --prefer-binary -r requirements.txt\n"
+    )
+    assert dockerfile_requirements(path) == [(4, tmp_path / "requirements.txt")]
+    # --deps follows dependencies, which are ranges: pip may pick an older release with a wheel for those.
+    with pytest.raises(DockerfileError, match=":4: pip install --prefer-binary .* and --deps isn't used"):
+        dockerfile_requirements(path, dependencies=True)
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--deps"]) == 2
+    assert f"{path}:4: pip install --prefer-binary makes pip pick an older release" in capsys.readouterr().err
+    assert fake_pypi == []
+    for text in ("purewheel==3.1\nnowheels>=0.9\n", "purewheel==3.*\n", "purewheel\n", "./vendored\n"):
+        (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
+        with pytest.raises(DockerfileError, match=":4: .*every requirement in requirements.txt is pinned with =="):
+            dockerfile_requirements(path)
+
+
+@pytest.mark.parametrize(
+    ("dockerfile", "constraints_text", "error"),
+    [
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt ./\n"
+            "RUN pip install -r requirements.txt -c constraints.txt\n",
+            "purewheel==3.1\n",
+            ":4: /app/constraints.txt isn't copied from the build context",
+        ),
+        (
+            "FROM python:3.13\nCOPY . /app/\nRUN pip install -r /app/requirements.txt --constraint constraints.txt\n",
+            "purewheel==3.1\n",
+            ":3: -c constraints.txt is relative, but no WORKDIR",
+        ),
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt -c constraints.txt\n",
+            "-c more.txt\npurewheel==3.1\n",
+            ":4: constraints.txt has a nested -r or -c",
+        ),
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt -c constraints.txt\n"
+            "RUN pip install -r requirements.txt\n",
+            "purewheel==3.1\n",
+            ":5: requirements.txt is installed again with other -c files than on line 4",
+        ),
+    ],
+)
+def test_dockerfile_install_constraint_file_refusals(tmp_path, dockerfile, constraints_text, error):
+    path = _context(tmp_path, dockerfile)
+    (tmp_path / "constraints.txt").write_text(constraints_text, encoding="utf-8")
+    with pytest.raises(DockerfileError, match=error):
+        dockerfile_requirements(path, constraints={})
+
+
+def test_dockerfile_install_constraint_file_symlinks(tmp_path):
+    # Refused and read exactly as a -r FILE is. Docker copies a link inside a copied folder as a link, so that isn't
+    # read; it copies what a link named as a COPY source points to (BuildKit's COPY sets FollowSymlinks), so one that
+    # stays inside the build context is read, and one that leaves it isn't.
+    context = tmp_path / "app"
+    folder = "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt -c constraints.txt\n"
+    path = _context(context, folder)
+    (context / "real.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    try:
+        (context / "constraints.txt").symlink_to(context / "real.txt")
+    except OSError:
+        pytest.skip("symlinks aren't available here")
+    with pytest.raises(DockerfileError, match=":3: constraints.txt is a symlink"):
+        dockerfile_requirements(path, constraints={})
+    path.write_text(folder.replace("COPY . .", "COPY requirements.txt constraints.txt ./"), encoding="utf-8")
+    found: dict = {}
+    assert dockerfile_requirements(path, constraints=found) == [(4, context / "requirements.txt")]
+    assert found == {context / "requirements.txt": (context / "constraints.txt",)}
+    (context / "constraints.txt").unlink()
+    (context / "constraints.txt").symlink_to(tmp_path / "outside.txt")
+    with pytest.raises(DockerfileError, match=":3: COPY constraints.txt: a symlink out of the build context"):
+        dockerfile_requirements(path, constraints={})
+
+
+def test_dockerfile_requirements_never_drops_install_constraints(tmp_path):
     path = _context(
         tmp_path,
-        f"FROM python:3.13\nWORKDIR /app\n{copy}\nRUN pip install -r requirements.txt -c constraints.txt\n",
+        "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt -c constraints.txt\n"
+        "RUN pip install -c constraints.txt -r requirements.txt -r dev.txt\n",
+        ["requirements.txt", "constraints.txt", "dev.txt"],
+    )
+    # A caller that doesn't take the constraints files would check the requirements without them.
+    with pytest.raises(DockerfileError, match=":4: pip install -c FILE isn't read here"):
+        dockerfile_requirements(path)
+    found: dict = {}
+    assert dockerfile_requirements(path, constraints=found) == [
+        (4, tmp_path / "requirements.txt"),
+        (5, tmp_path / "dev.txt"),
+    ]
+    assert found == {
+        tmp_path / "requirements.txt": (tmp_path / "constraints.txt",),
+        tmp_path / "dev.txt": (tmp_path / "constraints.txt",),
+    }
+
+
+def test_load_inputs_applies_install_constraints_like_a_constraint_line(tmp_path):
+    requirements, constraints, same = (tmp_path / name for name in ("requirements.txt", "constraints.txt", "same.txt"))
+    requirements.write_text("purewheel\nnowheels>=0.5\n", encoding="utf-8")
+    same.write_text("-c constraints.txt\npurewheel\nnowheels>=0.5\n", encoding="utf-8")
+    # A -r inside a constraints file is requirements, as pip reads it: those packages are kept too.
+    constraints.write_text("-r more.txt\npurewheel==3.1\nnowheels<1\n", encoding="utf-8")
+    (tmp_path / "more.txt").write_text("fastlib==2.0.0\n", encoding="utf-8")
+    (source,) = load_inputs([str(requirements)], requirements_constraints={requirements: (constraints,)})
+    (expected,) = load_inputs([str(same)])
+
+    def rows(src):
+        return [(p.name, p.version, p.spec) for p in src.packages]
+
+    assert rows(source) == rows(expected)
+    assert rows(source)[:2] == [("fastlib", "2.0.0", None), ("purewheel", "3.1", None)]
+    # The source is still a requirements file with a path: --fix and --github-annotations go by both.
+    assert (source.kind, source.path) == ("requirements", requirements)
+    assert (source.constraint_specs, source.specs) == (expected.constraint_specs, expected.specs)
+    lock = tmp_path / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8")
+    with pytest.raises(
+        SourceError, match=r"uv.lock: constraints files \(pip install -c\) only apply to a requirements"
+    ):
+        load_inputs([str(lock)], requirements_constraints={lock: (constraints,)})
+
+
+def test_cli_dockerfile_inputs_applies_install_constraints(tmp_path, capsys, fake_pypi):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt constraints.txt ./\n"
+        "RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt\n",
     )
     requirements = tmp_path / "requirements.txt"
     constraints = tmp_path / "constraints.txt"
     requirements.write_text("purewheel\n", encoding="utf-8")
-    if location == "symlink":
-        real = tmp_path / "real.txt"
-        real.write_text("purewheel==3.1\n", encoding="utf-8")
-        try:
-            constraints.symlink_to(real)
-        except OSError:
-            pytest.skip("creating symlinks needs privileges on Windows")
-        with pytest.raises(DockerfileError, match="constraints.txt is a symlink"):
-            dockerfile_requirements(path)
-        return
     constraints.write_text("purewheel==3.1\n", encoding="utf-8")
-    if location == "missing":
-        with pytest.raises(DockerfileError, match="constraints.txt isn't copied"):
-            dockerfile_requirements(path)
-        return
     assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
-    actual = json.loads(capsys.readouterr().out)["packages"]
+    captured = capsys.readouterr()
+    actual = json.loads(captured.out)["packages"]
+    assert f"wheelgap: note: {path}:4: RUN pip install -r reads {requirements}, -c {constraints}\n" in captured.err
     requirements.write_text("-c constraints.txt\npurewheel\n", encoding="utf-8")
     assert main([str(requirements), "-p", "3.13", "-t", "linux-x86_64", "--json"]) == 0
     assert actual == json.loads(capsys.readouterr().out)["packages"]

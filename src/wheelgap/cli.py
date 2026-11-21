@@ -1934,8 +1934,10 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             image = read_dockerfile(Path(args.dockerfile), build_args)
             if not quiet:
                 for install_line, requirements in installs:
+                    with_constraints = "".join(f", -c {file}" for file in docker_constraints.get(requirements, ()))
                     print(
-                        f"wheelgap: note: {args.dockerfile}:{install_line}: RUN pip install -r reads {requirements}",
+                        f"wheelgap: note: {args.dockerfile}:{install_line}: RUN pip install -r reads {requirements}"
+                        f"{with_constraints}",
                         file=sys.stderr,
                     )
                 for name, value in image.build_args:

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Dockerfile input checks read common pip install flags and apply per-install constraints. (#622, thanks [@kunalkshah1](https://github.com/kunalkshah1))
+- `--dockerfile-inputs` reads more `RUN pip install -r FILE` lines: `--upgrade`/`-U`, `--disable-pip-version-check`, `--root-user-action`, `--no-input` and `-q`/`--quiet` are read and ignored, as `--no-cache-dir` already was; `-c FILE` is followed back through `COPY` like `-r FILE` and applied as constraints; and `--prefer-binary` is read when every requirement is pinned with `==` (and `--deps` isn't used). Any other flag is still an error naming its line. (#622, thanks [@kunalkshah1](https://github.com/kunalkshah1))
 - Requirements files: an include cycle (two files that include each other, or a file that includes itself, with `-r` or `-c`) is now an input error naming the chain, as pip refuses it, instead of being read once and reported as a clean result. (#616, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - The MCP server's tools keep the notes that explain an empty `gap_wheels` even when the project sets `quiet = true`, so a client can still tell "no wheel fills these gaps" from "wasn't checked" or "--fix is off with another index". (#617, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - `--github-annotations --fix` puts the full stop before the pip command instead of after it, so copying the command from an annotation no longer gives pip a version ending in a full stop. (#615, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
