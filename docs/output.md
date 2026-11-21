@@ -51,13 +51,6 @@ Each cell is one of:
 | `–` | `n/a` | not installed on this target (environment markers exclude it, or it selects another resolution) |
 | `✓ bundled` | `bundled` | no wheel on PyPI, but Pyodide ships its own build (with `--pyodide-lock`) |
 
-With [`--dockerfile-inputs`](cli.md#dockerfile-inputs), the first line names the Dockerfile line that installs each
-file (after 0.13.0): `requirements.txt (Dockerfile:4)`, and with several files each gets its own,
-`requirements.txt (Dockerfile:4) + second.txt (Dockerfile:5)`. The line is the one the `RUN` starts on, as Docker
-numbers it, when the instruction continues over several lines. `--markdown` has the same header, and a
-[`--github-annotations`](cli.md#github-annotations) message, still placed on the requirements file's line, ends
-`(installed by Dockerfile:4)`.
-
 Packages that are fine everywhere are hidden; `--all` shows them. A range that picks a different release for
 different `-p` versions is one row per release, and the summary still counts the package once. With several targets, the summary also counts the
 gaps on each target that has any (`musl-aarch64  1 from source, 1 missing`). Packages that weren't checked, such as
@@ -68,6 +61,13 @@ A package that's only there because something else needs it names the direct dep
 when three of your direct dependencies lead to it. It names a dependency only when the lockfile shows that one really
 leads there on that target, so a package reached through another package's optional extra may have no hint.
 `--explain` gives the full path (`via: mcp → PyJWT → cryptography`); `--json` and quiet output keep the bare name.
+
+With [`--dockerfile-inputs`](cli.md#dockerfile-inputs), the first line names the Dockerfile line that installs each
+file (after 0.13.0): `requirements.txt (Dockerfile:4)`, and with several files each gets its own,
+`requirements.txt (Dockerfile:4) + second.txt (Dockerfile:5)`. The line is the one the `RUN` starts on, as Docker
+numbers it, when the instruction continues over several lines. `--markdown` has the same header, and a
+[`--github-annotations`](cli.md#github-annotations) message, still placed on the requirements file's line, ends
+`(installed by Dockerfile:4)`.
 
 With `-q` / `--quiet` (or `quiet = true`), only the summary and the names of the packages with gaps are printed:
 
