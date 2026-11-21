@@ -101,13 +101,21 @@ def parse(data: object) -> list[GapWheel] | None:
     return [w for w in map(_entry, data["wheels"]) if w is not None]
 
 
-def look_up(*, read_cache: bool = True, write_cache: bool = True) -> list[GapWheel] | None:
-    """The gap wheel list, or None if it couldn't be fetched or read. A list parse() accepts with at least one usable
-    entry is kept in the 24-hour cache (--no-cache: neither read nor saved; --online: fetched again, then saved)."""
-    if read_cache:
-        cached = cache.load_gap_wheels(pypi.GAP_WHEELS_URL)
-        if cached is not None and (wheels := parse(cached)):  # as saved: a list with a usable entry
-            return wheels
+def look_up_cached() -> tuple[list[GapWheel] | None, float | None]:
+    """The cached gap wheel list and the time it was saved (seconds since the epoch), or (None, None): not cached,
+    older than cache.GAP_WHEELS_MAX_AGE, unreadable, or without a usable entry. The caller (cli.gap_wheel_fills) uses
+    it only when it fills a gap, and otherwise calls fetch()."""
+    cached, saved = cache.load_gap_wheels_with_time(pypi.GAP_WHEELS_URL)
+    if cached is not None and saved is not None:
+        wheels = parse(cached)
+        if wheels:
+            return wheels, saved
+    return None, None
+
+
+def fetch(*, write_cache: bool = True) -> list[GapWheel] | None:
+    """The gap wheel list fetched from pypi.GAP_WHEELS_URL, or None if it couldn't be fetched or read. A list parse()
+    accepts with at least one usable entry is kept in the 1-hour cache if write_cache is True."""
     try:
         data = pypi.fetch_gap_wheels()
     except Exception:  # unreachable, a timeout, an HTTP error, a body that isn't JSON or is too big...
