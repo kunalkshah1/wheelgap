@@ -127,9 +127,13 @@ says which packages that changes (`pip_refuses` in `--json`). For a range the tw
 wheelgap picks as pip does, so under uv every requirement must be pinned with `==` (in `FILE`, in a file it includes,
 or by a constraints file) and `--deps` can't be used: an unpinned requirement is an error naming the `RUN` line, the
 requirement and its file. These are errors as well: a file not named `*.txt` or `*.in` (uv reads other names as
-locks, scripts or projects), a `-r` inside a constraints file (pip installs what it names, uv only constrains with
-it), a `uv.toml` or `pyproject.toml` copied into the image before the uv line, a file that pip installs on one line
-and uv on another, and every other `uv` command (`uv sync`, `uv add`, `uv pip sync`).
+locks, scripts or projects), an option line other than a plain `-r FILE` or `-c FILE` in any file the line reads
+(`--extra-index-url`, `--index-url`, `--no-binary`, `--only-binary`, `--pre`, `-e`: uv reads these by its own rules,
+and with a second index it takes the first one that has the package, where pip takes the best file of them all; a
+requirement with its own `--hash` is fine), a `-r` inside a constraints file (pip installs what it names, uv only
+constrains with it), a `uv.toml` or `pyproject.toml` copied into the image before the uv line (uv reads settings
+from them: copy the requirements file alone and run `uv pip install` before the `COPY` that brings them), a file
+that pip installs on one line and uv on another, and every other `uv` command (`uv sync`, `uv add`, `uv pip sync`).
 
 A `.dockerignore` is read as BuildKit reads it (**after 0.13.0**; 0.13.0 refuses any project that has one):
 `<Dockerfile name>.dockerignore` beside the Dockerfile if there is one, otherwise `.dockerignore` at the root of the

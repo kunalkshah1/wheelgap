@@ -1299,6 +1299,36 @@ _UV_FLAGS_READ = "--system, -r FILE, -c FILE, --no-cache, --no-cache-dir, --upgr
 _UV_REQUIREMENTS_SUFFIXES = (".txt", ".in")
 
 
+def _refuse_uv_option_lines(file: Path, number: int) -> None:
+    """A file `uv pip install` reads may only hold requirements and plain `-r FILE` / `-c FILE` lines. The reader
+    follows pip for every other option line, and uv differs: with --extra-index-url uv takes the first index that
+    has the package where pip takes the best file of them all, and it keeps --no-binary and --only-binary as two
+    sets with no `:none:` (uv 0.13.9: `--no-binary :all:` then `--no-binary :none:` builds from source; pip takes
+    the wheel). The include itself must be spelled as both read it: uv has no `-rFILE`, pip's optparse reads
+    `-r=FILE` as a file named `=FILE`, and uv doesn't take quotes or escapes out of a line as pip's shlex does.
+    A requirement with its own options (`six==1.16.0 --hash=...`) isn't an option line."""
+    for raw in _join_continued_lines(file.read_text(encoding="utf-8-sig")):
+        line = _COMMENT_RE.split(raw, 1)[0].strip()
+        if not line.startswith("-"):
+            continue
+        try:
+            tokens = shlex.split(line)  # as _requirement_includes, which has already split every such line
+        except ValueError:
+            tokens = []
+        option = re.sub(r"[^A-Za-z-].*", "", line.split()[0])  # the option's name: no value, so never a URL
+        if tokens == line.split() and (
+            (len(tokens) == 2 and tokens[0] in ("-r", "-c", "--requirement", "--constraint"))
+            or (len(tokens) == 1 and "=" in tokens[0] and option in ("--requirement", "--constraint"))
+        ):
+            continue
+        if not option.startswith("--"):
+            option = option[:2]  # `-ihttps://user:secret@host/simple`: never echo the URL
+        raise DockerfileError(
+            f"line {number}: {file.name} has a {option} line, and uv reads a requirements file's options by its own "
+            "rules: --dockerfile-inputs only reads requirements and -r FILE / -c FILE lines in a file uv installs"
+        )
+
+
 def _pip_install_files(number: int, args: str) -> tuple[list[str], list[str], bool, bool]:
     """(the -r FILEs, the -c FILEs, whether --prefer-binary is given, whether uv installs them) of a RUN that is
     exactly `pip install -r FILE...` (or `python -m pip ...`, or `uv pip install --system -r FILE...`) with flags
@@ -1527,6 +1557,9 @@ def _dockerfile_requirements(
                 f"line {number}: {host.name} includes {other.name}, and --dockerfile-inputs only reads requirements "
                 "files named *.txt or *.in for uv"
             )
+        if uv:
+            for read in (host, *nested):
+                _refuse_uv_option_lines(read, number)
         if includes is not None:
             includes[number, host] = nested
         return host
@@ -1558,7 +1591,10 @@ def _dockerfile_requirements(
             if run_error:
                 raise DockerfileError(run_error)
             if uv and (config := next((copy for copy in copies if _copies_config(copy, _UV_CONFIG_NAMES)), None)):
-                raise DockerfileError(f"line {config.line}: a uv.toml or pyproject.toml may change what uv installs")
+                raise DockerfileError(
+                    f"line {config.line}: this COPY puts a uv.toml or pyproject.toml in the image, and uv reads "
+                    "settings from them: copy the requirements file alone and run uv pip install before this COPY"
+                )
             if uv and dependencies:
                 # A dependency is a range, resolved here by pip's rules (see the pins asked for below).
                 raise DockerfileError(

@@ -2010,7 +2010,12 @@ def test_cli_dockerfile_inputs_reads_uv_pip_system_install(tmp_path, capsys, fak
     ("copy", "run", "message"),
     [
         ("COPY . ./", "uv pip install --system --no-deps -r requirements.txt", ":4: uv pip install --no-deps"),
-        ("COPY . ./", "uv pip install --system -r requirements.txt", ":3: a uv.toml or pyproject.toml"),
+        (
+            "COPY . ./",
+            "uv pip install --system -r requirements.txt",
+            ":3: this COPY puts a uv.toml or pyproject.toml in the image, and uv reads settings from them: "
+            "copy the requirements file alone and run uv pip install before this COPY",
+        ),
         ("COPY --from=ghcr.io/astral-sh/uv /other /bin/", "uv pip install --system -r requirements.txt", ":3: COPY"),
         ("COPY --from=other /uv /bin/", "uv pip install --system -r requirements.txt", ":3: COPY"),
         # uv reads these by name, as a lock and as a script with inline metadata, not as requirements files.
@@ -2209,6 +2214,82 @@ def test_dockerfile_requirements_uv_refuses_requirements_inside_constraints(tmp_
     includes: dict = {}
     assert dockerfile_requirements(path, includes=includes, uv_installs=set()) == [(4, requirements)]
     assert includes == {(4, requirements): (constraints, more)}
+
+
+_UV_FILES = {
+    "requirements.txt": "-r base.txt\npurewheel==3.1\n",
+    "base.txt": "nowheels==0.9\n",
+    "constraints.txt": "purewheel==3.1\n",
+}
+
+
+@pytest.mark.parametrize("name", list(_UV_FILES))
+def test_dockerfile_requirements_uv_refuses_option_lines_in_every_file_it_reads(tmp_path, name):
+    # uv reads a requirements file's option lines by its own rules: with --extra-index-url it takes the first index
+    # that has the package, where pip (and the requirements reader) takes the best file of them all.
+    path = _context(
+        tmp_path, _UV_RUN.format(" ".join(_UV_FILES), "-r requirements.txt -c constraints.txt"), list(_UV_FILES)
+    )
+    for file, text in _UV_FILES.items():
+        (tmp_path / file).write_text(text, encoding="utf-8")
+    requirements = tmp_path / "requirements.txt"
+    assert dockerfile_requirements(path, constraints={}, uv_installs=set()) == [(4, requirements)]
+    (tmp_path / name).write_text("--extra-index-url https://example.test/simple\n" + _UV_FILES[name], encoding="utf-8")
+    message = (
+        rf":4: {re.escape(name)} has a --extra-index-url line, and uv reads a requirements file's options by its "
+        "own rules: --dockerfile-inputs only reads requirements and -r FILE / -c FILE lines in a file uv installs"
+    )
+    with pytest.raises(DockerfileError, match=message):
+        dockerfile_requirements(path, constraints={}, uv_installs=set())
+    # pip installs the same three files, and they are read as before.
+    path.write_text(path.read_text(encoding="utf-8").replace("uv pip install --system", "pip install"), "utf-8")
+    assert dockerfile_requirements(path, constraints={}) == [(4, requirements)]
+
+
+@pytest.mark.parametrize(
+    ("line", "option"),
+    [
+        # uv keeps --no-binary and --only-binary as two sets, and pip lets a later line undo an earlier one.
+        ("--no-binary :all:", "--no-binary"),
+        ("--only-binary purewheel", "--only-binary"),
+        ("--pre -r base.txt", "--pre"),
+        ("-rbase.txt", "-r"),  # uv: "Expected '=' or whitespace"
+        ("-e .", "-e"),
+    ],
+)
+def test_dockerfile_requirements_uv_refuses_other_option_lines(tmp_path, line, option):
+    files = ["requirements.txt", "base.txt"]
+    path = _context(tmp_path, _UV_RUN.format(" ".join(files), "-r requirements.txt"), files)
+    (tmp_path / "requirements.txt").write_text(f"{line}\npurewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "base.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    with pytest.raises(
+        DockerfileError, match=rf":4: requirements.txt has a {re.escape(option)} line, and uv reads a requirements"
+    ):
+        dockerfile_requirements(path, uv_installs=set())
+
+
+def test_dockerfile_requirements_uv_option_line_message_leaves_the_url_out(tmp_path):
+    path = _context(tmp_path, _UV_RUN.format("requirements.txt", "-r requirements.txt"))
+    for line, option in (
+        ("-ihttps://user:hunter2@private.example.test/simple", "-i"),
+        ("--index-url=https://user:hunter2@private.example.test/simple", "--index-url"),
+        ("--index-url https://user:hunter2@private.example.test/simple", "--index-url"),
+    ):
+        (tmp_path / "requirements.txt").write_text(f"{line}\npurewheel==3.1\n", encoding="utf-8")
+        with pytest.raises(DockerfileError, match=f":4: requirements.txt has a {option} line, ") as err:
+            dockerfile_requirements(path, uv_installs=set())
+        assert "hunter2" not in str(err.value)
+        assert "private.example.test" not in str(err.value)
+
+
+def test_dockerfile_requirements_uv_reads_a_requirement_with_its_own_options(tmp_path):
+    # A requirement that carries --hash isn't an option line, on its own line or continued as pip-compile writes it
+    # (uv 0.13.1 installs it as pip does).
+    path = _context(tmp_path, _UV_RUN.format("requirements.txt", "-r requirements.txt"))
+    requirements = tmp_path / "requirements.txt"
+    for text in (f"purewheel==3.1 --hash=sha256:{'0' * 64}\n", f"purewheel==3.1 \\\n    --hash=sha256:{'0' * 64}\n"):
+        requirements.write_text(text, encoding="utf-8")
+        assert dockerfile_requirements(path, uv_installs=set()) == [(4, requirements)]
 
 
 def test_dockerfile_requirements_refuses_a_file_pip_and_uv_both_install(tmp_path):
