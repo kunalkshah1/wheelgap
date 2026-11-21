@@ -88,7 +88,16 @@ holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount
 `COPY --from`, globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a COPY that puts a file named
 `pip.conf` or `pip.ini` anywhere in the image, a `.dockerignore`, a `# syntax=` frontend other than
 `docker/dockerfile` (one pinned by digest, `docker/dockerfile:1@sha256:…`, is read when the Dockerfile has no
-heredoc). Local nested `-r` and `-c` includes are read when COPY puts the same file at the path pip reads in the image. Without this flag, `--dockerfile` reads only the image.
+heredoc). Without this flag, `--dockerfile` reads only the image.
+
+A `-r` or `-c` inside `FILE` (and inside the file it names, and so on) is an error in 0.13.0. **After 0.13.0** it is
+followed when the included file is in the image where pip looks for it. pip reads an include beside the including file *in the image*, so
+wheelgap finds the `COPY` that puts a file at that path and reads it only if it is the same file as the one beside the
+including file in the build context; the note on stderr then names every file read
+(`Dockerfile:4: RUN pip install -r reads requirements.txt, base.txt`). An include that no `COPY` puts there (pip would
+stop the build), one where a `COPY` puts a different file, a URL, a `${VAR}`, an absolute path, an abbreviated option
+(`--req`), an include on a line with an editable, or a symlink anywhere in the chain is still an error naming the
+`RUN` line.
 
 ### `--dockerfile-context` {#dockerfile-context}
 

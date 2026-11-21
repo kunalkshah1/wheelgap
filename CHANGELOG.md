@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Dockerfile input checks follow nested requirements and constraints when COPY puts the same files in the image. (#621, thanks [@kunalkshah1](https://github.com/kunalkshah1))
+- `--dockerfile-inputs` follows a `-r` or `-c` inside the requirements file the Dockerfile installs (split `base.txt` / `prod.txt` files), at any depth, when a `COPY` puts the included file where pip looks for it in the image, and the note on stderr names every file read. An include that isn't copied into the image, or where the image gets a different file, is an error naming the `RUN` line instead of being read from disk. (#621, thanks [@kunalkshah1](https://github.com/kunalkshah1))
 - Requirements files: an include cycle (two files that include each other, or a file that includes itself, with `-r` or `-c`) is now an input error naming the chain, as pip refuses it, instead of being read once and reported as a clean result. (#616, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - The MCP server's tools keep the notes that explain an empty `gap_wheels` even when the project sets `quiet = true`, so a client can still tell "no wheel fills these gaps" from "wasn't checked" or "--fix is off with another index". (#617, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - `--github-annotations --fix` puts the full stop before the pip command instead of after it, so copying the command from an annotation no longer gives pip a version ending in a full stop. (#615, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))

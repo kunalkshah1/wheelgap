@@ -1203,6 +1203,12 @@ def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_
         ("COPY . ./", "-r https://example.com/base.txt", "non-local include"),
         ("COPY . ./", "-c ${CONSTRAINTS}", "non-local include"),
         ("COPY . ./", "-e ./project -r base.txt", "unreadable -r or -c"),
+        # pip would read /app/base.txt in the image; the requirements reader would read that path on this machine.
+        ("COPY . ./", "-r /app/base.txt", "requirements.txt includes /app/base.txt by an absolute path"),
+        # pip opens it through sub/, which the image doesn't have.
+        ("COPY . ./", "-r sub/../base.txt", r"requirements.txt has an include with \.\. after a folder name"),
+        ("COPY . ./", "-r requirements.txt", "requirements include cycle through requirements.txt"),
+        ("COPY . ./", "-r", "requirements.txt: -r needs a file name"),
     ],
 )
 def test_dockerfile_requirements_refuses_unverifiable_includes(tmp_path, copies, contents, error):
@@ -1212,6 +1218,58 @@ def test_dockerfile_requirements_refuses_unverifiable_includes(tmp_path, copies,
     (tmp_path / "other.txt").write_text("nowheels==0.9\n", encoding="utf-8")
     run_line = 4 + copies.count("\n")
     with pytest.raises(DockerfileError, match=rf":{run_line}: .*{error}"):
+        dockerfile_requirements(path)
+
+
+def test_dockerfile_requirements_follows_includes_through_the_image(tmp_path):
+    # pip reads an include beside the including file in the image: /app/requirements/base.txt, /app/constraints.txt.
+    dockerfile = (
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements /app/requirements\n"
+        "RUN pip install -r requirements/prod.txt\n"
+    )
+    path = _context(tmp_path, dockerfile, ["requirements/prod.txt", "requirements/base.txt", "constraints.txt"])
+    prod = tmp_path / "requirements" / "prod.txt"
+    prod.write_text("-r base.txt\n-c ../constraints.txt\n", encoding="utf-8")
+    with pytest.raises(DockerfileError, match=":4: /app/constraints.txt isn't copied"):
+        dockerfile_requirements(path)
+    path.write_text(dockerfile.replace("RUN", "COPY constraints.txt /app/\nRUN"), encoding="utf-8")
+    includes: dict = {}
+    assert dockerfile_requirements(path, includes=includes) == [(5, prod)]
+    assert includes == {(5, prod): (tmp_path / "requirements" / "base.txt", tmp_path / "constraints.txt")}
+
+
+def test_dockerfile_requirements_includes_and_symlinks(tmp_path):
+    context = tmp_path / "app"
+    path = _context(
+        context,
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt base.txt ./\nRUN pip install -r requirements.txt\n",
+        ["requirements.txt", "base.txt", "real.txt"],
+    )
+    requirements, base, real = (context / name for name in ("requirements.txt", "base.txt", "real.txt"))
+    requirements.write_text("-r base.txt\n", encoding="utf-8")
+    try:
+        (tmp_path / "link").symlink_to(context, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks aren't available here")
+    # A build context reached through a symlink is read as before: only links below it count.
+    linked = tmp_path / "link"
+    includes: dict = {}
+    assert dockerfile_requirements(linked / "Dockerfile", includes=includes) == [(4, linked / "requirements.txt")]
+    assert includes == {(4, linked / "requirements.txt"): (linked / "base.txt",)}
+    # Docker copies what a link named as a COPY source points to, so a linked file with no include is read, as before.
+    requirements.unlink()
+    requirements.symlink_to(real)
+    assert dockerfile_requirements(path) == [(4, requirements)]
+    # With an include, pip reads base.txt beside the copy in the image, and the reader may look beside the target.
+    real.write_text("-r base.txt\n", encoding="utf-8")
+    with pytest.raises(DockerfileError, match=":4: requirements.txt is a symlink, which --dockerfile-inputs doesn't"):
+        dockerfile_requirements(path)
+    requirements.unlink()
+    requirements.write_text("-r base.txt\n", encoding="utf-8")
+    real.write_text("purewheel==3.1\n", encoding="utf-8")
+    base.unlink()
+    base.symlink_to(real)
+    with pytest.raises(DockerfileError, match=":4: base.txt is a symlink, which --dockerfile-inputs doesn't read"):
         dockerfile_requirements(path)
 
 
