@@ -51,11 +51,14 @@ Each cell is one of:
 | `–` | `n/a` | not installed on this target (environment markers exclude it, or it selects another resolution) |
 | `✓ bundled` | `bundled` | no wheel on PyPI, but Pyodide ships its own build (with `--pyodide-lock`) |
 
-Text and Markdown reports can end with `Run with --fix to see whether wheelgap's gap wheel index has a wheel
-for these.` With a cached gap wheel list, the hint instead says `Run with --fix: wheelgap's gap wheel index
-has a wheel for N of these.` and counts the covered gaps in the table. If the cached list covers none, the
-hint is omitted. Printing a hint never fetches the list. `--no-cache` and `--online` bypass the cache,
-and `--offline` omits the hint.
+The last line, `Run with --fix to see whether ...`, is printed without [`--fix`](cli.md#fix) when a gap could use a
+gap wheel; printing it never makes a request. After 0.13.0 it has a second form: when an earlier `--fix` run left the
+gap wheel list in the [cache](how-it-works.md#cache) (kept for an hour), the line is
+`Run with --fix: wheelgap's gap wheel index has a wheel for N of these.`, where N counts the gap cells of the table
+that the cached list fills, and when that list fills none of them there is no line. No line isn't a statement that
+nothing fits: a wheel published since the list was cached isn't in it, and `--fix` itself reads the list again before
+it says so. With no cached list, or with `--no-cache` or `--online` (which don't read the cache), the line is the
+first form. `--offline`, `--index-url` and a `WHEELGAP_INDEX_URL` mirror print neither.
 
 Packages that are fine everywhere are hidden; `--all` shows them. A range that picks a different release for
 different `-p` versions is one row per release, and the summary still counts the package once. With several targets, the summary also counts the
@@ -424,8 +427,9 @@ nowheels 0.9 on win-arm64: ● source
     pip install --extra-index-url https://wheelgap.github.io/wheels/simple/ nowheels==0.9
 ```
 
-The gap wheel list is read once and kept in the 24-hour [cache](how-it-works.md#cache) (only a list with at least one
-usable entry), with or without `--explain`; `--no-cache` neither reads nor saves it.
+The gap wheel list is read once and kept in the [cache](how-it-works.md#cache) for an hour (only a list with at least
+one usable entry), with or without `--explain`; `--no-cache` neither reads nor saves it. A cached list that fills none
+of the run's gaps is read again before wheelgap says no wheel fits.
 
 With `--json --fix`, the top-level `gap_wheels` list has one object per filled cell: `name`, `version`, `target` (the
 target label), `wheel` (its filename), `url` (where to download it) and `sha256`. It's `[]` when nothing fits, when

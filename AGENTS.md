@@ -32,7 +32,7 @@ uv run --group dev pytest
 | `targets.py` | Targets (Python × platform) and the wheel tags each accepts |
 | `check.py` | The status per package and target (`wheel`, `source`, `missing`, `unknown`, `n/a`, `bundled`) and `--explain` reasons |
 | `pypi.py` | The only HTTP client (`fetch_json`: retries, https-only redirects; `fetch_sdist_pyproject` reads an sdist's `pyproject.toml` as pip would) and the PyPI lookups (`fill`, `fill_all`, `recheck_lock`) |
-| `cache.py` | The 24-hour on-disk cache of pinned PyPI lookups, `--conda-forge` and `--piwheels` lookups, the tracker's notes, `--build-info` answers and the `--fix` gap wheel list (`--no-cache` and `--online` skip it) |
+| `cache.py` | The 24-hour on-disk cache of pinned PyPI lookups, `--conda-forge` and `--piwheels` lookups, the tracker's notes, `--build-info` answers, and the `--fix` gap wheel list for an hour (`--no-cache` and `--online` skip it) |
 | `build.py` | `--explain --build-info`: what a `source` build needs, from the `[build-system]` table of the sdist's `pyproject.toml` (read with `pypi.fetch_sdist_pyproject`) |
 | `dockerfile.py` | `--dockerfile`: reads the final stage's image and platform the way Docker/BuildKit does |
 | `suggest_targets.py` | `--suggest-targets`: targets and Pythons read from GitHub Actions workflows and `.gitlab-ci.yml` (only files whose every line is in a small, strict subset of YAML), and from Dockerfiles |
