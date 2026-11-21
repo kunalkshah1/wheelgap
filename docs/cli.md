@@ -413,8 +413,10 @@ uv.lock input, the same entries for the `# /// script` block of a script (or of 
 `example.py.lock`, then `uv lock --script example.py`), and an `--extra-index-url` line for pip otherwise. A cell counts only when it's `source` or `missing`
 (and not `--ignore`d), the package passes [the PyPI-origin rule](how-it-works.md#pypi-origin), and the index has a
 wheel of exactly that version whose tags the target accepts. It reads the index's list from wheelgap.github.io in one
-request that names no package, and only when a gap could use it. A list it could read is kept in the 24-hour
-[cache](how-it-works.md#cache) (`--no-cache` neither reads nor saves it, and `--online` reads it again). It never
+request that names no package, and only when a gap could use it. A list it could read is kept in the 1-hour
+[cache](how-it-works.md#cache) (`--no-cache` neither reads nor saves it, and `--online` reads it again). Before saying
+no wheel on the index fills these gaps from a cached list, wheelgap fetches the list once and looks again; if that fetch
+fails, it answers from the cached list and notes the time it was fetched. It never
 changes a status, the summary or the exit code: wheelgap still reports what PyPI has. `--offline` refuses the flag
 with an error; with `--index-url`, `index-url` in `[tool.wheelgap]` or a `WHEELGAP_INDEX_URL` mirror it's off and
 reads nothing. If the list can't be read, a note on stderr says so. With `--json` it adds

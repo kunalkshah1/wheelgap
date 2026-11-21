@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 MAX_AGE = 24 * 60 * 60  # seconds: new wheels for an existing release show up within a day
+GAP_WHEELS_MAX_AGE = 60 * 60  # seconds: new gap wheels are published often, but an hour avoids CI stampedes
 PRUNE_EVERY = 24 * 60 * 60  # seconds between two prunes of expired entries
 # The only files prune() and clear() ever delete: entries (_path's names) and leftovers of an interrupted save.
 _ENTRY = re.compile(r"[0-9a-f]{64}\.json", re.ASCII)
@@ -56,16 +57,24 @@ def _path(index: str, name: str, version: str) -> Path:
     return cache_dir() / f"{digest}.json"
 
 
-def _load(index: str, name: str, version: str, key: str) -> object:
-    """The `key` value of a cache entry, or None: not cached, older than MAX_AGE, or unreadable."""
+def _load_entry(
+    index: str, name: str, version: str, key: str, max_age: float = MAX_AGE
+) -> tuple[object, float] | tuple[None, None]:
+    """(value, saved_timestamp) of a cache entry, or (None, None): not cached, older than max_age, or unreadable."""
     try:
         entry = json.loads(_path(index, name, version).read_text(encoding="utf-8"))
         saved = entry["saved"]
-        if isinstance(saved, bool) or not isinstance(saved, int | float) or not 0 <= _now() - saved < MAX_AGE:
-            return None
-        return entry[key]
+        if isinstance(saved, bool) or not isinstance(saved, int | float) or not 0 <= _now() - saved < max_age:
+            return None, None
+        return entry[key], float(saved)
     except Exception:  # missing, corrupt or unreadable: a miss
-        return None
+        return None, None
+
+
+def _load(index: str, name: str, version: str, key: str, max_age: float = MAX_AGE) -> object:
+    """The `key` value of a cache entry, or None: not cached, older than max_age, or unreadable."""
+    value, _ = _load_entry(index, name, version, key, max_age=max_age)
+    return value
 
 
 def load_files(index: str, name: str, version: str) -> list[dict] | None:
@@ -211,11 +220,19 @@ def save_build(index: str, name: str, version: str, sha256: str, answer: dict | 
     _save(_build_key(index, sha256), name, version, "build", {"answer": answer})
 
 
-def load_gap_wheels(url: str) -> dict | None:
+def load_gap_wheels(url: str, max_age: float = GAP_WHEELS_MAX_AGE) -> dict | None:
     """--fix: the gap wheel list read from `url` (pypi.GAP_WHEELS_URL), or None for a miss. gapwheels.parse checks it
     again."""
-    doc = _load(f"gap-wheels-v1 {url}", "list", "schema-1", "document")
+    doc = _load(f"gap-wheels-v1 {url}", "list", "schema-1", "document", max_age=max_age)
     return doc if isinstance(doc, dict) and doc.get("schema") == 1 and isinstance(doc.get("wheels"), list) else None
+
+
+def load_gap_wheels_with_time(url: str, max_age: float = GAP_WHEELS_MAX_AGE) -> tuple[dict | None, float | None]:
+    """--fix: (gap wheel list, saved_timestamp) read from `url`, or (None, None)."""
+    doc, saved = _load_entry(f"gap-wheels-v1 {url}", "list", "schema-1", "document", max_age=max_age)
+    if isinstance(doc, dict) and doc.get("schema") == 1 and isinstance(doc.get("wheels"), list) and saved is not None:
+        return doc, saved
+    return None, None
 
 
 def save_gap_wheels(url: str, doc: dict) -> None:
