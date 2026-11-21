@@ -92,6 +92,7 @@ nav:
       - Pydantic AI: case-studies/pydantic-ai.md
       - MCP Python SDK: case-studies/mcp-python-sdk.md
       - Prefect: case-studies/prefect.md
+      - urllib3: case-studies/urllib3.md
   - Integrations:
       - Python API: python-api.md
       - MCP server: mcp.md

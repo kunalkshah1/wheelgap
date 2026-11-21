@@ -1157,7 +1157,7 @@ def test_check_dockerfile_inputs_refused_line_is_a_tool_error_with_its_line(fake
     assert reply["result"]["isError"] is True
     text = reply["result"]["content"][0]["text"]
     # -r FILE and --no-cache-dir are pip's own options, in the Dockerfile's words: they stay.
-    assert f"{dockerfile}:4: pip install .: the inputs argument only reads -r FILE and --no-cache-dir" in text
+    assert f"{dockerfile}:4: pip install .: the inputs argument only reads -r FILE" in text
     assert "--dockerfile-inputs" not in text  # the CLI's flag isn't an argument here
     assert not fake_pypi
 
@@ -1239,6 +1239,40 @@ def test_check_lockfile_fix_says_when_no_gap_wheel_fits(fake_pypi, gap_wheels, t
     data = reply["result"]["structuredContent"]
     assert data["gap_wheels"] == [] and gap_wheels.calls == 1
     assert "the fix argument: no wheel on the gap wheel index fills these gaps" in data["notes"]
+
+
+def test_check_lockfile_fix_refreshes_a_cached_list_that_fills_nothing(fake_pypi, gap_wheels, tmp_path, monkeypatch):
+    import urllib.error
+
+    from wheelgap import cache
+
+    monkeypatch.setattr(cache, "_now", lambda: 1_700_000_000.0)  # 2023-11-14 22:13:20 UTC
+    path = nowheels_requirements(tmp_path)
+
+    def check():
+        (_, reply) = run(init(), call("check_lockfile", path=path, fix=True, **FT_WIN_ARM))
+        return reply["result"]["structuredContent"]
+
+    # The list is cached with a wheel for another package: it fills nothing here.
+    gap_wheels.add("psycopg2", "2.9.11", "psycopg2-2.9.11-cp314-cp314t-win_arm64.whl")
+    assert check()["gap_wheels"] == [] and gap_wheels.calls == 1
+    # A refresh that fails: the answer comes from the cached list, and the note says so with its time.
+    live, gap_wheels.doc = gap_wheels.doc, urllib.error.URLError("temporary failure")
+    data = check()
+    assert data["gap_wheels"] == [] and gap_wheels.calls == 2
+    stale = (
+        "the fix argument: no wheel on the gap wheel list fetched at 22:13 UTC fills these gaps; "
+        "the list couldn't be refreshed"
+    )
+    assert stale in data["notes"]
+    assert "the fix argument: no wheel on the gap wheel index fills these gaps" not in data["notes"]
+    # The wheel is published: the cached list still lacks it, so the list is fetched again and the fill is found.
+    gap_wheels.doc = live
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    data = check()
+    assert [w["wheel"] for w in data["gap_wheels"]] == [FT_WHEEL] and gap_wheels.calls == 3
+    # Now the cached list fills the gap: no request.
+    assert [w["wheel"] for w in check()["gap_wheels"]] == [FT_WHEEL] and gap_wheels.calls == 3
 
 
 def test_check_lockfile_quiet_config_keeps_notes(fake_pypi, gap_wheels, tmp_path, monkeypatch):
