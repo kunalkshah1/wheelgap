@@ -67,6 +67,8 @@ def read_rules(path: Path) -> tuple[Rule, ...]:
                 pattern = "/" + pattern.lstrip("/")
             pattern = posixpath.normpath(pattern)
             if pattern == "/":
+                if include:
+                    raise ValueError  # the matcher cleans "!/" to a bare !
                 continue  # a rooted / cannot match a path relative to the context
             pattern = pattern.lstrip("/")
             if pattern == ".":

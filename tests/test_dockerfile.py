@@ -1221,7 +1221,7 @@ def test_dockerfile_requirements_dockerignore_matching(tmp_path, rules, excluded
         assert dockerfile_requirements(path) == [(4, requirements)]
 
 
-@pytest.mark.parametrize("pattern", [b"[unclosed", b"!", b"[z-a]", b"\xff"])
+@pytest.mark.parametrize("pattern", [b"[unclosed", b"!", b"!/", b"[z-a]", b"\xff"])
 def test_dockerfile_requirements_refuses_unreadable_dockerignore(tmp_path, pattern):
     path = _context(tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\n")
     (tmp_path / ".dockerignore").write_bytes(b"# comment\n" + pattern + b"\n")
