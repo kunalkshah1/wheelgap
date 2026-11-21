@@ -83,7 +83,19 @@ that folder too. Only a strict subset is read:
 - plain `COPY SRC... DEST` from the build context (`--chown`, `--chmod` and `--link` are fine);
 - `RUN` lines that are exactly `pip install -r FILE` or `python -m pip install -r FILE` (`--no-cache-dir` is fine),
   or only system package commands joined by `&&` (`apt-get`, `apt`, `apk`, `yum`, `dnf`, `microdnf`, adding users
-  and groups, `mkdir`, `chown`, `chmod`, and `rm` under `/var/lib/apt/lists/`, `/var/cache/` or `/root/.cache/`).
+  and groups, `mkdir`, `chown`, `chmod`, and `rm` under `/var/lib/apt/lists/`, `/var/cache/` or `/root/.cache/`);
+- on that `pip install` line, **after 0.13.0**: flags that don't change which files pip picks (`--upgrade` / `-U`,
+  `--disable-pip-version-check`, `--root-user-action ignore` or `=ignore` (or `warn`), `--no-input`, `-q` /
+  `--quiet`);
+- `-c FILE` / `--constraint FILE` on that line, **after 0.13.0**: the constraints file is followed back through
+  `WORKDIR` and `COPY` like `-r FILE`, with the same refusals, and applied to the line's requirements files as a
+  `-c FILE` line at the top of each would be (the note on stderr names it too). A requirements file installed twice
+  with different `-c` files is an error;
+- `--prefer-binary` on that line, **after 0.13.0**, only when every requirement in `FILE` is pinned with `==` and
+  `--deps` isn't used: otherwise pip may take an older release that has a wheel over a newer one that has none,
+  while wheelgap checks the newest. Any other `pip install` flag (`--no-deps`, `--pre`, `--index-url`,
+  `--only-binary`, `--user`, `--target`, `-e`, combined short flags such as `-Uq`, `--requirement=FILE`) is still an
+  error.
 
 Anything else in the final stage is an error naming its line, since it may change what pip installs or what `FILE`
 holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount`, a heredoc, `uv pip`), `ADD`,
