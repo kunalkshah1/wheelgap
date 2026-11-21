@@ -5354,6 +5354,16 @@ def test_uv_lock_online_python_upper_bound_is_per_python(capsys, tmp_path, fake_
         (">=3.15.99,!=3.15.99", "3.15", False),
         (">=3.16,<3.12", "3.15", True),
         ("==3.14,!=3.14", "3.15", True),
+        # Checked against uv 0.13.9 itself (uv pip install --dry-run on wheels with these Requires-Python).
+        ("==3.14.*", "3.13", False),
+        ("~=3.14.0", "3.13", False),
+        ("~=3.13.0", "3.15", True),
+        ("==3.14", "3.15", True),
+        ("===3.14", "3.15", True),
+        ("==3.15.0", "3.15", True),
+        # pip takes these, so there is nothing for uv to restore.
+        (">=3.10,!=3.15.*", "3.14", False),
+        ("!=3.15.*", "3.14", False),
         ("invalid", "3.15", False),
     ],
 )

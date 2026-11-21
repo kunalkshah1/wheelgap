@@ -459,8 +459,8 @@ them (`{"win-arm64": ["mcp", "httpx"]}`). `direct` has entries only for uv.lock,
 leaves out a target where the package is itself a direct dependency, and may leave one out when the lockfile doesn't
 record which direct dependency asked for an extra that leads to the package (Poetry 1.x).
 
-For a `uv.lock` checked with `--online`, a package with files that uv installs and pip would refuse (uv ignores
-`Requires-Python` upper bounds) also gets `pip_refuses` (after 0.13.0), with or without `--explain`: those files, each
+For a `uv.lock` checked with `--online`, a package with files that uv installs and pip would refuse (uv checks only
+the `Requires-Python` lower bound) also gets `pip_refuses` (after 0.13.0), with or without `--explain`: those files, each
 mapped to the reason, as in `{"agent_client_protocol-0.11.1-py3-none-any.whl": "requires Python <3.15,>=3.10"}`. Its
 `results` are still uv's. See [uv.lock](inputs.md#uvlock).
 
