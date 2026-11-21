@@ -964,6 +964,8 @@ def read_dockerfile(path: Path, build_args: Mapping[str, str] | None = None) -> 
 _PLAIN_ARGS_RE = re.compile(r"[A-Za-z0-9_./:=, \t-]*", re.ASCII)  # no quotes, $, escapes, globs, # or shell operators
 _PIP_RE = re.compile(r"pip(?:3(?:\.\d+)?)?", re.ASCII)
 _PYTHON_RE = re.compile(r"python(?:3(?:\.\d+)?)?", re.ASCII)
+_UV_IMAGE_RE = re.compile(r"ghcr\.io/astral-sh/uv(?::[\w][\w.-]*)?(?:@sha256:[0-9a-f]{64})?", re.ASCII)
+_UV_CONFIG_NAMES = ("uv.toml", "pyproject.toml")
 _COPY_FLAG_RE = re.compile(r"--(?:chown=[\w.:-]+|chmod=[0-7]{3,4}|link)", re.ASCII)
 _PLAIN = "no quotes, variables, escapes, globs, comments or shell operators"
 # RUN lines other than `pip install -r FILE` that are read as not changing what pip installs: system package managers
@@ -983,6 +985,7 @@ class _Copy:
     dest: str  # absolute and normalised
     into: bool  # the sources land inside dest: a / at its end, several sources, a folder, or dest a known folder
     error: str | None = None  # why wheelgap can't tell what this instruction puts in the image
+    uv_binaries: tuple[str, ...] = ()
 
 
 def _add_dir(dirs: set[str], folder: str) -> None:
@@ -1002,6 +1005,19 @@ def _read_copy(
     def unread(error: str) -> _Copy:
         return _Copy(number, (), "", False, error)
 
+    if args.startswith("--from=") and len(args.split()) >= 2:
+        source, *names, dest = args.split()
+        if (
+            _UV_IMAGE_RE.fullmatch(source.removeprefix("--from="))
+            and names in (["/uv"], ["/uv", "/uvx"])
+            and dest.endswith("/")
+            and _PLAIN_ARGS_RE.fullmatch(dest)
+            and (dest.startswith("/") or workdir is not None)
+        ):
+            target = posixpath.normpath(posixpath.join(workdir or "/", dest))
+            _add_dir(dirs, target)
+            return _Copy(number, (), target, True, uv_binaries=tuple(name[1:] for name in names))
+        return unread(f"COPY {source} isn't read by --dockerfile-inputs except when copying /uv and optional /uvx")
     if args.lstrip().startswith("[") or not _PLAIN_ARGS_RE.fullmatch(args):
         return unread(f"only a plain `COPY SRC... DEST` is read by --dockerfile-inputs ({_PLAIN}, no JSON form)")
     words = args.split()
@@ -1037,6 +1053,8 @@ def _read_copy(
 
 def _copied_file(copy: _Copy, target: str, context: Path) -> Path | None:
     """The file in the build context `copy` puts at `target` in the image, or None if it puts none there."""
+    if any(target == posixpath.join(copy.dest, binary) for binary in copy.uv_binaries):
+        raise DockerfileError(f"line {copy.line}: {target} is a uv binary from another image, not a requirements file")
     root = context.resolve()
     for rel, host, is_dir in reversed(copy.sources):  # a later source overwrites an earlier one
         if not is_dir:
@@ -1061,18 +1079,17 @@ def _copied_file(copy: _Copy, target: str, context: Path) -> Path | None:
     return None
 
 
-def _copies_pip_config(copy: _Copy) -> bool:
-    """Whether `copy` may put a file named pip.conf or pip.ini anywhere in the image. pip reads one from /etc,
-    /etc/xdg/pip, sys.prefix (/usr/local) and the home of whichever user runs it, so its name is what counts."""
+def _copies_config(copy: _Copy, names: tuple[str, ...]) -> bool:
+    """Whether COPY can put an installer configuration file anywhere in the image."""
     for rel, host, is_dir in copy.sources:
         if is_dir:
             for _, dirnames, filenames in os.walk(host):
-                if any(name.lower() in _PIP_CONFIG_NAMES for name in (*dirnames, *filenames)):
+                if any(name.lower() in names for name in (*dirnames, *filenames)):
                     return True
         # Not knowing whether dest is a folder in the image, either name may be the one the file gets.
-        elif any(posixpath.basename(name).lower() in _PIP_CONFIG_NAMES for name in (rel, copy.dest)):
+        elif any(posixpath.basename(name).lower() in names for name in (rel, copy.dest)):
             return True
-    return (copy.dest + "/").startswith(_PIP_CONFIG)
+    return names == _PIP_CONFIG_NAMES and (copy.dest + "/").startswith(_PIP_CONFIG)
 
 
 def _has_include(text: str) -> bool:
@@ -1111,10 +1128,11 @@ def _system_command(args: str) -> bool:
     return True
 
 
-def _pip_install_files(number: int, args: str) -> list[str]:
+def _pip_install_files(number: int, args: str) -> tuple[list[str], bool]:
     """The FILEs of a RUN that is exactly `pip install -r FILE...` (or `python -m pip ...`)."""
     unread = (
-        "only `RUN pip install -r FILE` and system package commands (apt-get, apk, dnf...) are read by "
+        "only `RUN pip install -r FILE`, `RUN uv pip install --system -r FILE` and "
+        "system package commands (apt-get, apk, dnf...) are read by "
         "--dockerfile-inputs, and this RUN may change what pip installs"
     )
     if args.startswith("--"):
@@ -1124,7 +1142,10 @@ def _pip_install_files(number: int, args: str) -> list[str]:
     if not _PLAIN_ARGS_RE.fullmatch(args):
         raise DockerfileError(f"line {number}: {unread} ({_PLAIN})")
     words = args.split()
-    if words[:1] and _PIP_RE.fullmatch(words[0]):
+    uv = words[:2] == ["uv", "pip"]
+    if uv:
+        rest = words[2:]
+    elif words[:1] and _PIP_RE.fullmatch(words[0]):
         rest = words[1:]
     elif len(words) >= 3 and _PYTHON_RE.fullmatch(words[0]) and words[1:3] == ["-m", "pip"]:
         rest = words[3:]
@@ -1133,26 +1154,38 @@ def _pip_install_files(number: int, args: str) -> list[str]:
     if rest[:1] != ["install"]:
         raise DockerfileError(f"line {number}: {unread}")
     files: list[str] = []
+    system = False
     i = 1
     while i < len(rest):
         if rest[i] in ("-r", "--requirement") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
             files.append(rest[i + 1])
             i += 2
-        elif rest[i] == "--no-cache-dir":
+        elif rest[i] == "--no-cache-dir" or uv and rest[i] == "--no-cache":
             i += 1
+        elif uv and rest[i] == "--system":
+            system = True
+            i += 1
+        elif uv:
+            raise DockerfileError(
+                f"line {number}: uv pip install {rest[i]}: only --system, -r FILE and cache flags are read"
+            )
         else:
             raise DockerfileError(
                 f"line {number}: pip install {rest[i]}: --dockerfile-inputs only reads -r FILE and --no-cache-dir"
             )
     if not files:
         raise DockerfileError(f"line {number}: {unread}")
-    return files
+    if uv and not system:
+        raise DockerfileError(f"line {number}: uv pip install needs --system for --dockerfile-inputs")
+    return files, uv
 
 
 def dockerfile_requirements(
     path: Path,
     build_args: Mapping[str, str] | None = None,
     context: Path | None = None,
+    *,
+    uv_installs: set[tuple[int, Path]] | None = None,
 ) -> list[tuple[int, Path]]:
     """(line, requirements file) for each `RUN pip install -r FILE` in the Dockerfile's final stage.
 
@@ -1174,7 +1207,13 @@ def dockerfile_requirements(
     context_label = str(context) if context is not None else "the Dockerfile's folder"
     try:
         return _dockerfile_requirements(
-            text, context_dir, path.name, build_args, dockerfile_dir=path.parent, context_label=context_label
+            text,
+            context_dir,
+            path.name,
+            build_args,
+            dockerfile_dir=path.parent,
+            context_label=context_label,
+            uv_installs=uv_installs,
         )
     except DockerfileError as e:
         number, _, message = str(e).removeprefix("line ").partition(": ")
@@ -1190,6 +1229,7 @@ def _dockerfile_requirements(
     build_args: Mapping[str, str] | None,
     dockerfile_dir: Path | None = None,
     context_label: str = "the Dockerfile's folder",
+    uv_installs: set[tuple[int, Path]] | None = None,
 ) -> list[tuple[int, Path]]:
     df_dir = dockerfile_dir if dockerfile_dir is not None else context
     for ignore in (context / ".dockerignore", df_dir / f"{name}.dockerignore"):
@@ -1246,7 +1286,7 @@ def _dockerfile_requirements(
                 _add_dir(dirs, workdir)
         elif keyword == "COPY":
             copies.append(copy := _read_copy(number, args, workdir, dirs, context, context_label))
-            if _copies_pip_config(copy):
+            if _copies_config(copy, _PIP_CONFIG_NAMES):
                 run_error = f"line {number}: a pip config file may change what pip installs"
         elif keyword == "ADD":
             copies.append(_Copy(number, (), "", False, "ADD isn't read by --dockerfile-inputs, use COPY"))
@@ -1255,9 +1295,11 @@ def _dockerfile_requirements(
         elif keyword in ("ENV", "ARG") and re.search(r"(?<![A-Za-z0-9_])(?:PIP|UV)_", args):
             run_error = f"line {number}: an {keyword} setting PIP_ or UV_ variables changes what pip installs"
         elif keyword == "RUN" and not _system_command(args):
-            files = _pip_install_files(number, args)
+            files, uv = _pip_install_files(number, args)
             if run_error:
                 raise DockerfileError(run_error)
+            if uv and (config := next((copy for copy in copies if _copies_config(copy, _UV_CONFIG_NAMES)), None)):
+                raise DockerfileError(f"line {config.line}: a uv.toml or pyproject.toml may change what uv installs")
             for file in files:
                 if file.startswith("/"):
                     target = posixpath.normpath(file)
@@ -1282,6 +1324,8 @@ def _dockerfile_requirements(
                     raise DockerfileError(
                         f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
                     )
+                if uv and uv_installs is not None:
+                    uv_installs.add((number, host))
                 found.setdefault(host, number)
             # An unread COPY or ADD before the one that copies FILE may still put a pip config file in the image.
             if unread := next((copy for copy in copies if copy.error), None):

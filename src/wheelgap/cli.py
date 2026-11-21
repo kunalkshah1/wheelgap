@@ -1894,10 +1894,13 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         config_inputs = [str(context_dir)]
     else:
         config_inputs = args.inputs
+    uv_installs: set[tuple[int, Path]] = set()
     try:
         if args.dockerfile_inputs:
             context = Path(args.dockerfile_context) if args.dockerfile_context else None
-            installs = dockerfile_requirements(Path(args.dockerfile), build_args, context=context)
+            installs = dockerfile_requirements(
+                Path(args.dockerfile), build_args, context=context, uv_installs=uv_installs
+            )
             args.inputs = [str(requirements) for _, requirements in installs]
         if args.clear_cache:
             folder, count = cache.clear()
@@ -1927,8 +1930,10 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             image = read_dockerfile(Path(args.dockerfile), build_args)
             if not quiet:
                 for install_line, requirements in installs:
+                    installer = "uv pip" if (install_line, requirements) in uv_installs else "pip"
                     print(
-                        f"wheelgap: note: {args.dockerfile}:{install_line}: RUN pip install -r reads {requirements}",
+                        f"wheelgap: note: {args.dockerfile}:{install_line}: "
+                        f"RUN {installer} install -r reads {requirements}",
                         file=sys.stderr,
                     )
                 for name, value in image.build_args:

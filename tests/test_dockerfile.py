@@ -1073,7 +1073,7 @@ def test_dockerfile_requirements_reads(tmp_path, dockerfile, files, expected):
     ("dockerfile", "message"),
     [
         ("FROM python:3.13\nRUN apt-get update\n", "the final stage \\(line 1\\) has no `RUN pip install -r FILE`"),
-        ("FROM python:3.13\nRUN echo hi\n", ":2: only `RUN pip install -r FILE` and system package commands"),
+        ("FROM python:3.13\nRUN echo hi\n", ":2: only `RUN pip install -r FILE`"),
         # A RUN that edits, replaces or removes the file between the COPY and the install.
         (
             "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt .\nRUN echo uwsgi >> requirements.txt\n"
@@ -1105,7 +1105,7 @@ def test_dockerfile_requirements_reads(tmp_path, dockerfile, files, expected):
             ":4: only `RUN pip install -r FILE`",
         ),
         ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install .\n", ":4: pip install \\.: --dockerfile-inputs"),
-        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN uv pip install --system -r requirements.txt\n", ":4: only"),
+        ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN uv pip install -r requirements.txt\n", ":4: .*needs --system"),
         ("FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r $REQS\n", ":4: only `RUN"),
         (
             "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN --mount=type=cache,target=/root/.cache pip install "
@@ -1189,6 +1189,37 @@ def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_
             dockerfile_requirements(path)
     (tmp_path / ".dockerignore").write_text("*.txt\n", encoding="utf-8")
     with pytest.raises(DockerfileError, match=r"\.dockerignore may leave files out of the build context"):
+        dockerfile_requirements(path)
+
+
+@pytest.mark.parametrize("dest", ["/bin/", "/usr/local/bin/"])
+@pytest.mark.parametrize("binaries", ["/uv", "/uv /uvx"])
+def test_cli_dockerfile_inputs_reads_uv_pip_system_install(tmp_path, capsys, fake_pypi, dest, binaries):
+    path = _context(
+        tmp_path,
+        f"FROM python:3.13\nCOPY --from=ghcr.io/astral-sh/uv:0.13.9 {binaries} {dest}\n"
+        "WORKDIR /app\nCOPY requirements.txt .\nRUN uv pip install --system --no-cache -r requirements.txt\n",
+    )
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    result = capsys.readouterr()
+    assert f"{path}:5: RUN uv pip install -r reads " in result.err
+    assert main([str(tmp_path / "requirements.txt"), "-p", "3.13", "-t", "linux-x86_64", "--json"]) == 0
+    assert json.loads(result.out)["packages"] == json.loads(capsys.readouterr().out)["packages"]
+
+
+@pytest.mark.parametrize(
+    ("copy", "run", "message"),
+    [
+        ("COPY . ./", "uv pip install --system --no-deps -r requirements.txt", ":4: uv pip install --no-deps"),
+        ("COPY . ./", "uv pip install --system -r requirements.txt", ":3: a uv.toml or pyproject.toml"),
+        ("COPY --from=ghcr.io/astral-sh/uv /other /bin/", "uv pip install --system -r requirements.txt", ":3: COPY"),
+        ("COPY --from=other /uv /bin/", "uv pip install --system -r requirements.txt", ":3: COPY"),
+    ],
+)
+def test_dockerfile_inputs_refuses_unsupported_uv_installs(tmp_path, copy, run, message):
+    path = _context(tmp_path, f"FROM python:3.13\nWORKDIR /app\n{copy}\nRUN {run}\n")
+    (tmp_path / "uv.toml").write_text("no-binary = true\n", encoding="utf-8")
+    with pytest.raises(DockerfileError, match=message):
         dockerfile_requirements(path)
 
 
