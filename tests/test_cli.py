@@ -3292,6 +3292,108 @@ def test_github_annotations_fail_on_missing_mixes_levels(capsys, fake_pypi, fixt
     ]
 
 
+@pytest.fixture
+def dockerfile_provenance_inputs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    Path("Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.13-slim\n"
+        "WORKDIR /app\n"
+        "COPY requirements.txt second.txt ./\n"
+        "RUN pip install -r requirements.txt\n"
+        "RUN pip install -r second.txt\n",
+        encoding="utf-8",
+    )
+    Path("requirements.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    Path("second.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("flags", [(), ("--markdown",)])
+def test_dockerfile_input_provenance_in_report_headers(capsys, fake_pypi, dockerfile_provenance_inputs, flags):
+    code, out, err = run(capsys, "--dockerfile", "Dockerfile", "--dockerfile-inputs", *flags)
+    assert code == 1
+    assert "requirements.txt (Dockerfile:4)" in out
+    assert "second.txt (Dockerfile:5)" in out
+    assert "Dockerfile:4: RUN pip install -r reads requirements.txt" in err
+    assert "Dockerfile:5: RUN pip install -r reads second.txt" in err
+
+
+def test_dockerfile_input_provenance_in_json_and_annotations(capsys, fake_pypi, dockerfile_provenance_inputs):
+    code, out, err = run(capsys, "--dockerfile", "Dockerfile", "--dockerfile-inputs", "--json", "--github-annotations")
+    assert code == 1
+    report = json.loads(out)
+    _assert_matches_output_schema(report)
+    assert report["sources"] == ["requirements.txt", "second.txt"]
+    assert report["dockerfile_inputs"] == [
+        {"dockerfile": "Dockerfile", "line": 4, "file": "requirements.txt"},
+        {"dockerfile": "Dockerfile", "line": 5, "file": "second.txt"},
+    ]
+    assert "::error file=requirements.txt,line=1," in err
+    assert "nowheels 0.9 builds from source on linux-x86_64 (installed by Dockerfile:4)." in err
+    assert "::error file=second.txt,line=1," in err
+    assert "psycopg2 2.9.11 builds from source on linux-x86_64 (installed by Dockerfile:5)." in err
+
+
+def test_dockerfile_input_provenance_names_the_line_a_continued_run_starts_on(capsys, fake_pypi, tmp_path, monkeypatch):
+    # Docker numbers an instruction by the line it starts on; the -r here is three lines further down, and the
+    # Dockerfile sits in a folder of its own, with the build context given.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    Path("docker").mkdir()
+    Path("docker/Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.13-slim\n"
+        "WORKDIR /app\n"
+        "COPY requirements.txt ./\n"
+        "RUN apt-get update \\\n"
+        "    && apt-get install -y gcc\n"
+        "RUN pip install \\\n"
+        "    # the pinned set\n"
+        "    --no-cache-dir \\\n"
+        "    -r requirements.txt\n",
+        encoding="utf-8",
+    )
+    Path("requirements.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    args = ["--dockerfile", "docker/Dockerfile", "--dockerfile-inputs", "--dockerfile-context", "."]
+    code, out, err = run(capsys, *args)
+    assert code == 1 and " · requirements.txt (docker/Dockerfile:6) · 1 package · Python 3.13\n" in out
+    assert "docker/Dockerfile:6: RUN pip install -r reads requirements.txt" in err
+    code, out, err = run(capsys, *args, "--json", "--github-annotations")
+    report = json.loads(out)
+    _assert_matches_output_schema(report)
+    assert report["sources"] == ["requirements.txt"]
+    assert report["dockerfile_inputs"] == [{"dockerfile": "docker/Dockerfile", "line": 6, "file": "requirements.txt"}]
+    assert "::error file=requirements.txt,line=1," in err
+    assert "nowheels 0.9 builds from source on linux-x86_64 (installed by docker/Dockerfile:6)." in err
+
+
+def test_dockerfile_inputs_file_is_relative_to_the_build_context(capsys, fake_pypi, tmp_path, monkeypatch):
+    # The Dockerfile's folder is the build context, given or not, and absolute or not: `file` is the same.
+    monkeypatch.chdir(tmp_path)
+    Path("docker/reqs").mkdir(parents=True)
+    Path("docker/Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.13-slim\nWORKDIR /app\nCOPY reqs/base.txt ./\n"
+        "RUN pip install -r base.txt\n",
+        encoding="utf-8",
+    )
+    Path("docker/reqs/base.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    for context in ([], ["--dockerfile-context", str(tmp_path / "docker")]):
+        _, out, _ = run(capsys, "--dockerfile", "docker/Dockerfile", "--dockerfile-inputs", "--json", *context)
+        report = json.loads(out)
+        _assert_matches_output_schema(report)
+        assert report["dockerfile_inputs"] == [{"dockerfile": "docker/Dockerfile", "line": 4, "file": "reqs/base.txt"}]
+
+
+def test_no_dockerfile_inputs_key_without_the_flag(capsys, fake_pypi, dockerfile_provenance_inputs):
+    _, out, err = run(capsys, "requirements.txt", "--dockerfile", "Dockerfile", "--json", "--github-annotations")
+    assert "dockerfile_inputs" not in json.loads(out) and "installed by" not in err
+
+
+@pytest.mark.parametrize("flags", [(), ("--markdown",), ("--json",), ("--github-annotations",)])
+def test_plain_dockerfile_run_has_no_install_provenance(capsys, fake_pypi, dockerfile_provenance_inputs, flags):
+    plain = run(capsys, "requirements.txt", "-p", "3.13", "-t", "linux-x86_64", *flags)
+    assert run(capsys, "requirements.txt", "--dockerfile", "Dockerfile", *flags) == plain
+
+
 def test_github_annotations_advisory_targets_are_warnings(capsys, fake_pypi, fixtures, monkeypatch):
     # A package whose gaps are all on --advisory targets doesn't fail the run, so it's a warning that says why;
     # advisory targets are marked in every message.

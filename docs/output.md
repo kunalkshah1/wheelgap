@@ -73,6 +73,13 @@ when three of your direct dependencies lead to it. It names a dependency only wh
 leads there on that target, so a package reached through another package's optional extra may have no hint.
 `--explain` gives the full path (`via: mcp → PyJWT → cryptography`); `--json` and quiet output keep the bare name.
 
+With [`--dockerfile-inputs`](cli.md#dockerfile-inputs), the first line names the Dockerfile line that installs each
+file (after 0.13.0): `requirements.txt (Dockerfile:4)`, and with several files each gets its own,
+`requirements.txt (Dockerfile:4) + second.txt (Dockerfile:5)`. The line is the one the `RUN` starts on, as Docker
+numbers it, when the instruction continues over several lines. `--markdown` has the same header, and a
+[`--github-annotations`](cli.md#github-annotations) message, still placed on the requirements file's line, ends
+`(installed by Dockerfile:4)`.
+
 With `-q` / `--quiet` (or `quiet = true`), only the summary and the names of the packages with gaps are printed:
 
 ```text
@@ -448,6 +455,12 @@ for inputs pip installs from as they are; a lockfile's entries have no `install`
 [`wheelgap-output.schema.json`](https://github.com/wheelgap/wheelgap/blob/main/docs/wheelgap-output.schema.json)
 (JSON Schema 2020-12), which matches the wheelgap version it ships with; later versions may add keys, so ignore any
 you don't know. Keys are never renamed or removed.
+
+With [`--dockerfile-inputs`](cli.md#dockerfile-inputs) (after 0.13.0), the top-level `dockerfile_inputs` list has one
+entry per requirements file, in the order of `sources`: the `dockerfile` path as it was given, the `line` its `RUN`
+starts on (counted from 1; the first `RUN` that installs the file, if several do), and the `file` path relative to
+the build context, with `/` on every OS (`reqs/base.txt`), as the Dockerfile's `COPY` names it; `sources` gives its
+name only. The key is absent without the flag.
 
 `results`, `rejected` and `via` are all keyed by target label: just the platform (`"linux-x86_64"`) when one Python is
 checked, or Python and platform (`"3.13 linux-x86_64"`) with several. The top-level `targets` list gives each target's

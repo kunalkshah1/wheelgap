@@ -7,13 +7,21 @@ import math
 import os
 import posixpath
 import re
+import shlex
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
 
-from .sources import _COMMENT_RE, _abbreviated_include, _join_continued_lines, parse_requirements
+from .sources import (
+    _COMMENT_RE,
+    SourceError,
+    _abbreviated_include,
+    _join_continued_lines,
+    _line_include,
+    parse_requirements,
+)
 from .targets import ALPINE_MUSL, DEBIAN_GLIBC
 
 # Debian release an official python X.Y tag that names none (python:3.13, python:3.13-slim) is built on, per Python.
@@ -1075,23 +1083,119 @@ def _copies_pip_config(copy: _Copy) -> bool:
     return (copy.dest + "/").startswith(_PIP_CONFIG)
 
 
-def _has_include(text: str) -> bool:
-    """Whether a requirements file has a -r or -c anywhere pip reads one: on a line of options, after other options
-    (`--pre -r base.txt`), over a continuation, or abbreviated (`--req base.txt`)."""
-    for raw in _join_continued_lines(text):
+def _requirement_includes(host: Path, number: int) -> list[str]:
+    """The files a requirements or constraints file includes with -r or -c, as written, found on the same lines and
+    with the same reader (`_line_include`) as `_read_requirements` in sources.py, which reads the file afterwards.
+    An include wheelgap can't follow from the image back to the build context is a DockerfileError: a URL, a
+    variable, an absolute path (pip reads it in the image; the reader would read that path on this machine), an
+    abbreviated option, or one on a line with an editable."""
+    includes = []
+    for raw in _join_continued_lines(host.read_text(encoding="utf-8-sig")):
         line = _COMMENT_RE.split(raw, 1)[0].strip()
-        if line.startswith("#"):
+        if not line.startswith("-"):
             continue
-        for token in line.split():
-            token = re.sub(r"[\"'\\]", "", token)  # pip shlex-splits options: `"-r"` and `\-r` are -r too
-            option = token.split("=", 1)[0]
-            if (
-                (token.startswith(("-r", "-c")) and not token.startswith("--"))
-                or option in ("--requirement", "--constraint")
-                or _abbreviated_include(token)
-            ):
-                return True
-    return False
+        try:
+            tokens = shlex.split(line)  # as pip reads a line of options
+        except ValueError:
+            raise DockerfileError(f"line {number}: {host.name}: pip can't split this line: {line}") from None
+        try:
+            include = _line_include(tokens, host.name)
+        except SourceError as e:  # names the file itself
+            raise DockerfileError(f"line {number}: {e}") from None
+        if any(_abbreviated_include(token) for token in tokens) or (
+            include is None and any(token.startswith(("-r", "-c", "--requirement", "--constraint")) for token in tokens)
+        ):
+            raise DockerfileError(f"line {number}: {host.name} has an unreadable -r or -c: {line}")
+        if include is None:
+            continue
+        name = include[1]
+        if name.startswith("/"):
+            raise DockerfileError(
+                f"line {number}: {host.name} includes {name} by an absolute path, which --dockerfile-inputs "
+                "doesn't read: write it relative to the file"
+            )
+        if any(text in name for text in (":", "${", "\\")):
+            raise DockerfileError(f"line {number}: {host.name} has a non-local include: {name}")
+        parts = name.split("/")
+        if any(part == ".." and parts[i - 1] != ".." for i, part in enumerate(parts) if i):
+            # pip opens `sub/../base.txt` through `sub`, which the image may not have.
+            raise DockerfileError(f"line {number}: {host.name} has an include with .. after a folder name: {name}")
+        if any(token.startswith(("-r=", "-c=")) for token in tokens):
+            raise DockerfileError(f"line {number}: {host.name} has an unreadable -r or -c: {line}")
+        includes.append(name)
+    return includes
+
+
+def _find_copied_file(copies: list[_Copy], target: str, context: Path, number: int) -> Path:
+    """The file in the build context that the COPY instructions in `copies` leave at `target` in the image: the last
+    one that puts a file there wins, as in the build."""
+    for copy in reversed(copies):
+        if copy.error:
+            raise DockerfileError(f"line {copy.line}: {copy.error}")
+        if (host := _copied_file(copy, target, context)) is not None:
+            return host
+    raise DockerfileError(f"line {number}: {target} isn't copied from the build context by a COPY before this line")
+
+
+def _symlink_below(host: Path, context: Path) -> Path | None:
+    """The outermost part of `host` below the build context that is a symlink, relative to the context. The context
+    folder itself may be one: Docker and wheelgap both read through it."""
+    relative = host.relative_to(context)
+    for part in reversed([relative, *relative.parents][:-1]):
+        if (context / part).is_symlink():
+            return part
+    return None
+
+
+def _check_includes(
+    host: Path,
+    target: str,
+    copies: list[_Copy],
+    context: Path,
+    number: int,
+) -> tuple[Path, ...]:
+    """The files that `host` (at `target` in the image) includes with -r or -c, at every depth, each checked to be the
+    file the image has where pip looks for it. pip resolves an include beside the including file in the image;
+    `_read_requirements` resolves it beside the file in the build context. So each include is followed in the image
+    (`_find_copied_file`) and must come back to that same file in the context: one that isn't copied, or where a
+    COPY puts another file, is a DockerfileError, and nothing the image doesn't have is read."""
+    found: dict[Path, None] = {}
+    active: set[Path] = set()
+    checked: set[tuple[Path, str]] = set()
+
+    def no_symlink(file: Path) -> None:
+        # A symlinked folder in a copied folder stays a link in the image, where it may point somewhere else: it isn't
+        # followed. A symlinked file isn't either: stricter than pip needs now that the reader takes a link's
+        # includes from the link's folder (#618), but nothing is read through a link that way.
+        if (link := _symlink_below(file, context)) is not None:
+            raise DockerfileError(
+                f"line {number}: {link} is a symlink, which --dockerfile-inputs doesn't read "
+                "for a file with a -r or -c, or a file one names"
+            )
+
+    def visit(current: Path, image: str) -> None:
+        if (current, image) in checked:
+            return
+        active.add(current)
+        includes = _requirement_includes(current, number)
+        if includes:
+            no_symlink(current)
+        for include in includes:
+            image_path = posixpath.normpath(posixpath.join(posixpath.dirname(image), include))
+            copied = _find_copied_file(copies, image_path, context, number)
+            no_symlink(copied)
+            expected = Path(os.path.abspath(current.parent / include))
+            if Path(os.path.abspath(copied)) != expected or (current.parent / include).resolve() != copied.resolve():
+                raise DockerfileError(f"line {number}: {current.name} includes {include}, but COPY puts {copied} there")
+            if copied in active:
+                raise DockerfileError(f"line {number}: requirements include cycle through {include}")
+            found[copied] = None
+            visit(copied, image_path)
+        active.remove(current)
+        checked.add((current, image))
+
+    visit(host, target)
+    return tuple(found)
 
 
 def _system_command(args: str) -> bool:
@@ -1185,6 +1289,7 @@ def dockerfile_requirements(
     build_args: Mapping[str, str] | None = None,
     context: Path | None = None,
     *,
+    includes: dict[tuple[int, Path], tuple[Path, ...]] | None = None,
     constraints: dict[Path, tuple[Path, ...]] | None = None,
     dependencies: bool = False,
 ) -> list[tuple[int, Path]]:
@@ -1198,8 +1303,10 @@ def dockerfile_requirements(
     requirements file's `-c` files, to pass to load_inputs; `dependencies` says the check will follow dependencies
     (--deps), which --prefer-binary then can't be read for. Anything else that may change what pip installs or put
     FILE in the image (any other RUN, ADD, COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip
-    config file, a .dockerignore, a `# syntax=` frontend other than docker/dockerfile, a nested -r or -c) is a
-    DockerfileError naming its line, never a guess.
+    config file, a .dockerignore, a `# syntax=` frontend other than docker/dockerfile) is a DockerfileError naming
+    its line, never a guess. A -r or -c inside a `-r FILE` or a `-c FILE` is followed only when a COPY puts that same
+    file where pip looks for it in the image (_check_includes); `includes`, if given, is filled with the files each
+    (line, FILE) includes, for the requirements files and the constraints files alike.
     """
     try:
         text = path.read_bytes().decode("utf-8-sig")
@@ -1216,6 +1323,7 @@ def dockerfile_requirements(
             build_args,
             dockerfile_dir=path.parent,
             context_label=context_label,
+            includes=includes,
             constraints=constraints,
             dependencies=dependencies,
         )
@@ -1233,6 +1341,7 @@ def _dockerfile_requirements(
     build_args: Mapping[str, str] | None,
     dockerfile_dir: Path | None = None,
     context_label: str = "the Dockerfile's folder",
+    includes: dict[tuple[int, Path], tuple[Path, ...]] | None = None,
     constraints: dict[Path, tuple[Path, ...]] | None = None,
     dependencies: bool = False,
 ) -> list[tuple[int, Path]]:
@@ -1290,19 +1399,12 @@ def _dockerfile_requirements(
             )
         else:
             target = posixpath.normpath(posixpath.join(workdir, file))
-        for copy in reversed(copies):
-            if copy.error:
-                raise DockerfileError(f"line {copy.line}: {copy.error}")
-            if (host := _copied_file(copy, target, context)) is not None:
-                break
-        else:
-            raise DockerfileError(
-                f"line {number}: {target} isn't copied from the build context by a COPY before this line"
-            )
-        if _has_include(host.read_text(encoding="utf-8-sig", errors="replace")):
-            raise DockerfileError(
-                f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
-            )
+        host = _find_copied_file(copies, target, context, number)
+        # A constraints file's includes are verified as a requirements file's are: a -r inside it is read as
+        # requirements (pip's rule), so those packages are installed, and a -c inside it constrains them all.
+        nested = _check_includes(host, target, copies, context, number)
+        if includes is not None:
+            includes[number, host] = nested
         return host
 
     for number, instruction in instructions[start + 1 :]:
@@ -1336,14 +1438,23 @@ def _dockerfile_requirements(
                 raise DockerfileError(f"line {number}: pip install -c FILE isn't read here")
             for file in files:
                 host = copied_requirements(file, "-r")
-                if prefer_binary and (
-                    dependencies or any(not package.version for package in parse_requirements(host).packages)
-                ):
+                # Read as load_inputs will read it: with the line's -c files, and through every include, so a
+                # requirement in an included file (or in a -r inside a constraints file) counts, and a requirement
+                # that only a constraint pins with == counts as pinned.
+                unpinned = (
+                    [p for p in parse_requirements(host, constraint_paths).packages if not p.version]
+                    if prefer_binary and not dependencies
+                    else []
+                )
+                if prefer_binary and (dependencies or unpinned):
+                    where = host.name
+                    if unpinned and unpinned[0].origin != host.name:
+                        where = f"{unpinned[0].origin} (read with {host.name})"
                     # With it pip takes an older release that has a wheel over a newer one that has none, and
                     # wheelgap checks the newest release a requirement allows: only a pin gives both the same one.
                     raise DockerfileError(
                         f"line {number}: pip install --prefer-binary makes pip pick an older release that has a "
-                        f"wheel, so it's only read when every requirement in {host.name} is pinned with == "
+                        f"wheel, so it's only read when every requirement in {where} is pinned with == "
                         "and --deps isn't used"
                     )
                 if host in found and used_constraints[host] != constraint_paths:

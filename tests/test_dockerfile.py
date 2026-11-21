@@ -1187,11 +1187,113 @@ def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_
         '--pre --"requirement"=base.txt\n',
     ):
         (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
-        with pytest.raises(DockerfileError, match=":4: requirements.txt has a nested -r or -c"):
+        with pytest.raises(
+            DockerfileError, match=":4: (?:/app/base.txt isn't copied|requirements.txt has an unreadable)"
+        ):
             dockerfile_requirements(path)
     (tmp_path / ".dockerignore").write_text("*.txt\n", encoding="utf-8")
     with pytest.raises(DockerfileError, match=r"\.dockerignore may leave files out of the build context"):
         dockerfile_requirements(path)
+
+
+@pytest.mark.parametrize(
+    ("copies", "contents", "error"),
+    [
+        ("COPY requirements.txt ./", "-r base.txt", "base.txt isn't copied"),
+        ("COPY requirements.txt ./\nCOPY base.txt /elsewhere/", "-r base.txt", "base.txt isn't copied"),
+        ("COPY . ./\nCOPY other.txt /app/base.txt", "-r base.txt", "COPY puts .*other.txt there"),
+        ("COPY . ./", "-r https://example.com/base.txt", "non-local include"),
+        ("COPY . ./", "-c ${CONSTRAINTS}", "non-local include"),
+        ("COPY . ./", "-e ./project -r base.txt", "unreadable -r or -c"),
+        # pip would read /app/base.txt in the image; the requirements reader would read that path on this machine.
+        ("COPY . ./", "-r /app/base.txt", "requirements.txt includes /app/base.txt by an absolute path"),
+        # pip opens it through sub/, which the image doesn't have.
+        ("COPY . ./", "-r sub/../base.txt", r"requirements.txt has an include with \.\. after a folder name"),
+        ("COPY . ./", "-r requirements.txt", "requirements include cycle through requirements.txt"),
+        ("COPY . ./", "-r", "requirements.txt: -r needs a file name"),
+    ],
+)
+def test_dockerfile_requirements_refuses_unverifiable_includes(tmp_path, copies, contents, error):
+    path = _context(tmp_path, f"FROM python:3.13\nWORKDIR /app\n{copies}\nRUN pip install -r requirements.txt\n")
+    (tmp_path / "requirements.txt").write_text(contents, encoding="utf-8")
+    (tmp_path / "base.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    run_line = 4 + copies.count("\n")
+    with pytest.raises(DockerfileError, match=rf":{run_line}: .*{error}"):
+        dockerfile_requirements(path)
+
+
+def test_dockerfile_requirements_follows_includes_through_the_image(tmp_path):
+    # pip reads an include beside the including file in the image: /app/requirements/base.txt, /app/constraints.txt.
+    dockerfile = (
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements /app/requirements\n"
+        "RUN pip install -r requirements/prod.txt\n"
+    )
+    path = _context(tmp_path, dockerfile, ["requirements/prod.txt", "requirements/base.txt", "constraints.txt"])
+    prod = tmp_path / "requirements" / "prod.txt"
+    prod.write_text("-r base.txt\n-c ../constraints.txt\n", encoding="utf-8")
+    with pytest.raises(DockerfileError, match=":4: /app/constraints.txt isn't copied"):
+        dockerfile_requirements(path)
+    path.write_text(dockerfile.replace("RUN", "COPY constraints.txt /app/\nRUN"), encoding="utf-8")
+    includes: dict = {}
+    assert dockerfile_requirements(path, includes=includes) == [(5, prod)]
+    assert includes == {(5, prod): (tmp_path / "requirements" / "base.txt", tmp_path / "constraints.txt")}
+
+
+def test_dockerfile_requirements_includes_and_symlinks(tmp_path):
+    context = tmp_path / "app"
+    path = _context(
+        context,
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt base.txt ./\nRUN pip install -r requirements.txt\n",
+        ["requirements.txt", "base.txt", "real.txt"],
+    )
+    requirements, base, real = (context / name for name in ("requirements.txt", "base.txt", "real.txt"))
+    requirements.write_text("-r base.txt\n", encoding="utf-8")
+    try:
+        (tmp_path / "link").symlink_to(context, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks aren't available here")
+    # A build context reached through a symlink is read as before: only links below it count.
+    linked = tmp_path / "link"
+    includes: dict = {}
+    assert dockerfile_requirements(linked / "Dockerfile", includes=includes) == [(4, linked / "requirements.txt")]
+    assert includes == {(4, linked / "requirements.txt"): (linked / "base.txt",)}
+    # Docker copies what a link named as a COPY source points to, so a linked file with no include is read, as before.
+    requirements.unlink()
+    requirements.symlink_to(real)
+    assert dockerfile_requirements(path) == [(4, requirements)]
+    # With an include it is refused: no file in an include chain is read through a link.
+    real.write_text("-r base.txt\n", encoding="utf-8")
+    with pytest.raises(DockerfileError, match=":4: requirements.txt is a symlink, which --dockerfile-inputs doesn't"):
+        dockerfile_requirements(path)
+    requirements.unlink()
+    requirements.write_text("-r base.txt\n", encoding="utf-8")
+    real.write_text("purewheel==3.1\n", encoding="utf-8")
+    base.unlink()
+    base.symlink_to(real)
+    with pytest.raises(DockerfileError, match=":4: base.txt is a symlink, which --dockerfile-inputs doesn't read"):
+        dockerfile_requirements(path)
+
+
+def test_cli_dockerfile_inputs_follows_nested_requirements_and_constraints(tmp_path, capsys, fake_pypi):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt base.txt prod.txt constraints.txt ./\n"
+        "RUN pip install -r requirements.txt\n",
+    )
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("-r base.txt\n-c constraints.txt\n", encoding="utf-8")
+    (tmp_path / "base.txt").write_text("-r prod.txt\n", encoding="utf-8")
+    (tmp_path / "prod.txt").write_text("purewheel\n", encoding="utf-8")
+    (tmp_path / "constraints.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    assert main([str(requirements), "-p", "3.13", "-t", "linux-x86_64", "--json"]) == 0
+    regular = json.loads(capsys.readouterr().out)
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    result = capsys.readouterr()
+    assert json.loads(result.out)["packages"] == regular["packages"]
+    assert f"{path}:4: RUN pip install -r reads " in result.err
+    for name in ("requirements.txt", "base.txt", "prod.txt", "constraints.txt"):
+        assert str(tmp_path / name) in result.err
 
 
 @pytest.mark.parametrize(
@@ -1301,10 +1403,17 @@ def test_dockerfile_requirements_prefer_binary_needs_pins_and_no_deps(tmp_path, 
             "purewheel==3.1\n",
             ":3: -c constraints.txt is relative, but no WORKDIR",
         ),
+        # A -r or -c inside the constraints file is followed only when the image has that file, as one inside -r FILE.
+        (
+            "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt constraints.txt ./\n"
+            "RUN pip install -r requirements.txt -c constraints.txt\n",
+            "-c more.txt\npurewheel==3.1\n",
+            ":4: /app/more.txt isn't copied from the build context",
+        ),
         (
             "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt -c constraints.txt\n",
-            "-c more.txt\npurewheel==3.1\n",
-            ":4: constraints.txt has a nested -r or -c",
+            "--cons more.txt\npurewheel==3.1\n",
+            ":4: constraints.txt has an unreadable -r or -c",
         ),
         (
             "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt -c constraints.txt\n"
@@ -1411,6 +1520,113 @@ def test_cli_dockerfile_inputs_applies_install_constraints(tmp_path, capsys, fak
     assert main([str(requirements), "-p", "3.13", "-t", "linux-x86_64", "--json"]) == 0
     assert actual == json.loads(capsys.readouterr().out)["packages"]
     assert actual[0]["version"] == "3.1"
+
+
+def test_dockerfile_install_constraint_file_includes_are_verified(tmp_path, capsys, fake_pypi):
+    # A -r inside a constraints file is requirements (pip's rule): its packages are installed, so the file must be
+    # the one the image has beside /app/constraints.txt, and its packages are checked.
+    dockerfile = (
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt constraints.txt ./\n"
+        "RUN pip install -r requirements.txt -c constraints.txt\n"
+    )
+    path = _context(tmp_path, dockerfile, ["requirements.txt", "constraints.txt", "more.txt"])
+    requirements, constraints, more = (tmp_path / name for name in ("requirements.txt", "constraints.txt", "more.txt"))
+    requirements.write_text("purewheel\n", encoding="utf-8")
+    constraints.write_text("-r more.txt\npurewheel==3.1\n", encoding="utf-8")
+    more.write_text("fastlib==2.0.0\n", encoding="utf-8")
+    # more.txt is in the build context but not in the image: pip would stop the build, so nothing is read from disk.
+    with pytest.raises(DockerfileError, match=":4: /app/more.txt isn't copied from the build context"):
+        dockerfile_requirements(path, constraints={})
+    path.write_text(dockerfile.replace("constraints.txt ./", "constraints.txt more.txt ./"), encoding="utf-8")
+    includes: dict = {}
+    found: dict = {}
+    assert dockerfile_requirements(path, includes=includes, constraints=found) == [(4, requirements)]
+    assert found == {requirements: (constraints,)}
+    assert includes == {(4, requirements): (), (4, constraints): (more,)}
+    (source,) = load_inputs([str(requirements)], requirements_constraints=found)
+    assert [(p.name, p.version) for p in source.packages] == [("fastlib", "2.0.0"), ("purewheel", "3.1")]
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert sorted((p["name"], p["version"]) for p in json.loads(captured.out)["packages"]) == [
+        ("fastlib", "2.0.0"),
+        ("purewheel", "3.1"),
+    ]
+    note = (
+        f"wheelgap: note: {path}:4: RUN pip install -r reads {requirements}, -c {constraints} (which includes {more})\n"
+    )
+    assert note in captured.err
+
+
+def test_dockerfile_requirements_prefer_binary_needs_pins_in_included_files(tmp_path):
+    dockerfile = (
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt base.txt constraints.txt more.txt ./\n"
+        "RUN pip install --prefer-binary -r requirements.txt\n"
+    )
+    path = _context(tmp_path, dockerfile, ["requirements.txt", "base.txt", "constraints.txt", "more.txt"])
+    requirements, base, constraints, more = (
+        tmp_path / name for name in ("requirements.txt", "base.txt", "constraints.txt", "more.txt")
+    )
+    requirements.write_text("-r base.txt\npurewheel==3.1\n", encoding="utf-8")
+    base.write_text("nowheels==0.9\n", encoding="utf-8")
+    assert dockerfile_requirements(path) == [(4, requirements)]
+    # requirements.txt's own lines are pinned; the file it includes isn't.
+    base.write_text("nowheels>=0.9\n", encoding="utf-8")
+    with pytest.raises(
+        DockerfileError, match=r":4: .*every requirement in base.txt \(read with requirements.txt\) is pinned with =="
+    ):
+        dockerfile_requirements(path)
+    # A -r inside the line's constraints file is requirements too, so it needs pins as well.
+    path.write_text(dockerfile.replace("-r requirements.txt", "-r requirements.txt -c constraints.txt"), "utf-8")
+    base.write_text("nowheels==0.9\n", encoding="utf-8")
+    constraints.write_text("-r more.txt\n", encoding="utf-8")
+    more.write_text("fastlib>=2\n", encoding="utf-8")
+    with pytest.raises(
+        DockerfileError, match=r":4: .*every requirement in more.txt \(read with requirements.txt\) is pinned with =="
+    ):
+        dockerfile_requirements(path, constraints={})
+    # A requirement the constraints file pins with == installs that one release, with or without --prefer-binary.
+    more.write_text("fastlib==2.0.0\n", encoding="utf-8")
+    base.write_text("nowheels\n", encoding="utf-8")
+    constraints.write_text("-r more.txt\nnowheels==0.9\n", encoding="utf-8")
+    assert dockerfile_requirements(path, constraints={}) == [(4, requirements)]
+    with pytest.raises(DockerfileError, match=":4: pip install --prefer-binary .* and --deps isn't used"):
+        dockerfile_requirements(path, constraints={}, dependencies=True)
+    constraints.write_text("-r more.txt\nnowheels>=0.9\n", encoding="utf-8")
+    with pytest.raises(
+        DockerfileError, match=r":4: .*every requirement in base.txt \(read with requirements.txt\) is pinned with =="
+    ):
+        dockerfile_requirements(path, constraints={})
+
+
+def test_dockerfile_requirements_install_constraints_and_in_file_constraints_share_a_chain(tmp_path):
+    # constraints.txt is named on the RUN line and by prod.txt (from one folder down), and has a -c of its own.
+    dockerfile = (
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements /app/requirements\nCOPY constraints.txt pins.txt /app/\n"
+        "RUN pip install -r requirements/prod.txt -c constraints.txt\n"
+    )
+    path = _context(
+        tmp_path,
+        dockerfile,
+        ["requirements/prod.txt", "requirements/base.txt", "constraints.txt", "pins.txt", "other.txt"],
+    )
+    prod, base = tmp_path / "requirements" / "prod.txt", tmp_path / "requirements" / "base.txt"
+    constraints, pins = tmp_path / "constraints.txt", tmp_path / "pins.txt"
+    prod.write_text("-c ../constraints.txt\n-r base.txt\npurewheel\n", encoding="utf-8")
+    base.write_text("nowheels\n", encoding="utf-8")
+    constraints.write_text("-c pins.txt\npurewheel==3.1\n", encoding="utf-8")
+    pins.write_text("nowheels==0.9\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("nowheels==0.8\n", encoding="utf-8")
+    includes: dict = {}
+    found: dict = {}
+    assert dockerfile_requirements(path, includes=includes, constraints=found) == [(5, prod)]
+    assert found == {prod: (constraints,)}
+    assert includes == {(5, constraints): (pins,), (5, prod): (constraints, pins, base)}
+    (source,) = load_inputs([str(prod)], requirements_constraints=found)
+    assert [(p.name, p.version) for p in source.packages] == [("nowheels", "0.9"), ("purewheel", "3.1")]
+    # The image gets another file where constraints.txt's -c looks: pip would pin nowheels from that one.
+    path.write_text(dockerfile.replace("RUN", "COPY other.txt /app/pins.txt\nRUN"), encoding="utf-8")
+    with pytest.raises(DockerfileError, match=":6: constraints.txt includes pins.txt, but COPY puts .*other.txt there"):
+        dockerfile_requirements(path, constraints={})
 
 
 def test_cli_dockerfile_inputs_checks_what_the_image_installs(tmp_path, capsys, fake_pypi):
