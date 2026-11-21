@@ -95,7 +95,7 @@ brotli 1.2.1 on win-amd64: ● source
   brotli-1.2.1-cp314-cp314-win_amd64.whl         built for cp314-cp314, not CPython 3.14t
 ```
 
-Brotli 1.2.1 publishes wheels for the regular builds of CPython 3.10 to 3.15 and for PyPy, but none tagged `cp314t`,
+Brotli 1.2.1 publishes wheels for the regular builds of CPython up to 3.15 and for PyPy, but none tagged `cp314t`,
 and a free-threaded interpreter can't load a `cp314-cp314` wheel. It has an sdist, so wheelgap says `source`, not
 `missing`. Brotli 1.2.1 is the newest release, which is why `--suggest` has nothing to offer. On regular CPython 3.15
 the same pin is a wheel on every target, as the first scan shows.
