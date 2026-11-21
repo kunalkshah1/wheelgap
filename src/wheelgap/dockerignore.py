@@ -21,6 +21,11 @@ _SPACE = (
     "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 )
 
+# Docker's client matches on the machine that sends the context. On Windows a `\` in a pattern is a path separator,
+# not an escape (filepath.Match has no escapes there), and filepath.Clean keeps volume names and UNC prefixes, so
+# these patterns can't be read there by the rules below.
+_WINDOWS_CLIENT = os.sep == "\\"
+
 
 class IgnoreError(ValueError):
     """An ignore rule cannot be read with BuildKit's semantics."""
@@ -62,6 +67,8 @@ def read_rules(path: Path) -> tuple[Rule, ...]:
                 pattern = pattern[1:].strip(_SPACE)
                 if not pattern:
                     raise ValueError
+            if _WINDOWS_CLIENT and ("\\" in pattern or ":" in pattern or pattern.startswith("//")):
+                raise ValueError
             # Go filepath.Clean collapses all leading slashes, unlike posixpath.normpath.
             if pattern.startswith("/"):
                 pattern = "/" + pattern.lstrip("/")
@@ -71,6 +78,10 @@ def read_rules(path: Path) -> tuple[Rule, ...]:
                     raise ValueError  # the matcher cleans "!/" to a bare !
                 continue  # a rooted / cannot match a path relative to the context
             pattern = pattern.lstrip("/")
+            # The matcher trims and cleans each pattern once more (patternmatcher.New): whitespace that cleaning left
+            # at an end (`./ a`) goes, and a pattern left starting with ! (`./!a`) becomes an exception.
+            if pattern != pattern.strip(_SPACE) or (not include and pattern.startswith("!")):
+                raise ValueError
             if pattern == ".":
                 continue  # historical Docker exception
             rules.append(Rule(f"{label} ({text.strip(_SPACE)!r})", pattern, include, _compile(pattern)))
@@ -201,7 +212,22 @@ def _match_tokens(path: str, tokens: list[_Token]) -> bool:
 
 def context_rules(context: Path, dockerfile: Path) -> tuple[Rule, ...]:
     """A Dockerfile-specific ignore file takes precedence over the root ignore file."""
-    for path in (dockerfile.with_name(f"{dockerfile.name}.dockerignore"), context / ".dockerignore"):
-        if os.path.lexists(path):
-            return read_rules(path)
-    return ()
+    specific, root = dockerfile.with_name(f"{dockerfile.name}.dockerignore"), context / ".dockerignore"
+    if not os.path.lexists(specific):
+        return read_rules(root) if os.path.lexists(root) else ()
+    rules = read_rules(specific)
+    # BuildKit falls back to the root file when the specific file's content reaches it as nil rather than as empty
+    # (`bc.dockerignore == nil`), which depends on how the frontend runs: the built-in one reads an empty file as
+    # empty, a `# syntax=` one gets it over gRPC, where empty bytes arrive as nil.
+    # https://github.com/moby/buildkit/blob/dd75b4955087a5a2d52188d6ce25b509b323280e/frontend/dockerui/config.go#L421-L429
+    # https://github.com/moby/buildkit/blob/dd75b4955087a5a2d52188d6ce25b509b323280e/frontend/dockerui/config.go#L543-L592
+    try:
+        empty = not specific.read_bytes()
+    except OSError as e:
+        raise IgnoreError(f"{specific.name}: cannot read ignore file: {e.strerror}") from None
+    if empty and os.path.lexists(root) and read_rules(root):
+        raise IgnoreError(
+            f"{specific.name} is empty, and whether Docker then reads .dockerignore depends on the Dockerfile "
+            "frontend: put a comment in it, or delete it"
+        )
+    return rules

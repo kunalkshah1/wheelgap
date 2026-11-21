@@ -90,15 +90,22 @@ holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount
 `docker/dockerfile` (one pinned by digest, `docker/dockerfile:1@sha256:…`, is read when the Dockerfile has no
 heredoc), or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile` reads only the image.
 
+A `.dockerignore` is read as BuildKit reads it (**after 0.13.0**; 0.13.0 refuses any project that has one):
+`<Dockerfile name>.dockerignore` beside the Dockerfile if there is one, otherwise `.dockerignore` at the root of the
+build context. A requirements file that the rules leave out of the context is an error naming its `COPY` line and the
+rule, since the build would fail there. A pattern wheelgap can't read exactly as Docker does is an error naming the
+ignore file's line: one Docker rejects, a `\` escape before a letter or digit, any `\` on Windows (where Docker reads
+it as a path separator), or an empty `<Dockerfile name>.dockerignore` next to a `.dockerignore` with rules (which of
+the two Docker then uses depends on the Dockerfile frontend).
+
 ### `--dockerfile-context` {#dockerfile-context}
 
 `--dockerfile-context DIR` (with `--dockerfile-inputs`, **after 0.13.0**): the build context, for a Dockerfile that
 isn't built from its own folder. For `docker build -f docker/Dockerfile .`, run
 `wheelgap --dockerfile docker/Dockerfile --dockerfile-inputs --dockerfile-context .`. `COPY` sources are looked for in
 `DIR`, a path or symlink that leaves `DIR` is refused, and `[tool.wheelgap]` and `.python-version` are read from `DIR`.
-Wheelgap uses `<Dockerfile name>.dockerignore` beside the Dockerfile when present, otherwise `.dockerignore`
-at the root of `DIR`. An ignored requirements file is an error on its `COPY` line. Invalid or unsupported
-ignore patterns are an error on the ignore file's line. A `DIR` that isn't a folder exits 2. This isn't
+The ignore file is looked for where Docker reads it: `<Dockerfile name>.dockerignore` beside the Dockerfile if there
+is one, otherwise `.dockerignore` at the root of `DIR`. A `DIR` that isn't a folder exits 2. This isn't
 `docker buildx build --build-context`, which adds named contexts.
 
 ### `--build-arg` {#build-arg}
