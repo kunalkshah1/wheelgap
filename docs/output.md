@@ -52,6 +52,16 @@ Each cell is one of:
 | `–` | `n/a` | not installed on this target (environment markers exclude it, or it selects another resolution) |
 | `✓ bundled` | `bundled` | no wheel on PyPI, but Pyodide ships its own build (with `--pyodide-lock`) |
 
+After 0.13.0, a run without [`--fix`](cli.md#fix) ends with a line about it when a gap could use a gap wheel; printing
+it never makes a request. With no gap wheel list in the [cache](how-it-works.md#cache), or with `--no-cache` or
+`--online` (which don't read the cache), it is
+`Run with --fix to see whether wheelgap's gap wheel index has a wheel for these.` When an earlier `--fix` run left the
+list in the cache (kept for an hour), it is
+`Run with --fix: wheelgap's gap wheel index has a wheel for N of these gaps.`, where N counts the gap cells of the table
+that the cached list fills, and when that list fills none of them there is no line. No line isn't a statement that
+nothing fits: a wheel published since the list was cached isn't in it, and `--fix` itself reads the list again before it
+says so. `--offline`, `--index-url` and a `WHEELGAP_INDEX_URL` mirror print neither.
+
 Packages that are fine everywhere are hidden; `--all` shows them. A range that picks a different release for
 different `-p` versions is one row per release, and the summary still counts the package once. With several targets, the summary also counts the
 gaps on each target that has any (`musl-aarch64  1 from source, 1 missing`). Packages that weren't checked, such as
@@ -105,11 +115,11 @@ Other inputs have no dependency graph, so they show no path. If you think wheelg
 (or `--json --explain`) is all a bug report needs, with no need to share your lockfile.
 
 For a `uv.lock` checked with `--online`, `--explain` also names (after 0.13.0) each package that uv installs and pip
-would refuse (uv ignores `Requires-Python` upper bounds; see [uv.lock](inputs.md#uvlock)), whether or not it has a
+would refuse (uv checks the `Requires-Python` lower bound; see [uv.lock](inputs.md#uvlock)), whether or not it has a
 gap:
 
 ```text
-agent-client-protocol 0.11.1 on linux-x86_64: checked as uv installs it (uv ignores Requires-Python upper bounds); pip refuses it: requires Python <3.15,>=3.10
+agent-client-protocol 0.11.1 on linux-x86_64: checked as uv installs it (uv checks the Requires-Python lower bound); pip refuses it: requires Python <3.15,>=3.10
 ```
 
 When the package comes from PyPI and publishes an issue tracker in its metadata (or a GitHub repository fallback),
@@ -474,8 +484,8 @@ them (`{"win-arm64": ["mcp", "httpx"]}`). `direct` has entries only for uv.lock,
 leaves out a target where the package is itself a direct dependency, and may leave one out when the lockfile doesn't
 record which direct dependency asked for an extra that leads to the package (Poetry 1.x).
 
-For a `uv.lock` checked with `--online`, a package with files that uv installs and pip would refuse (uv ignores
-`Requires-Python` upper bounds) also gets `pip_refuses` (after 0.13.0), with or without `--explain`: those files, each
+For a `uv.lock` checked with `--online`, a package with files that uv installs and pip would refuse (uv checks only
+the `Requires-Python` lower bound) also gets `pip_refuses` (after 0.13.0), with or without `--explain`: those files, each
 mapped to the reason, as in `{"agent_client_protocol-0.11.1-py3-none-any.whl": "requires Python <3.15,>=3.10"}`. Its
 `results` are still uv's. See [uv.lock](inputs.md#uvlock).
 

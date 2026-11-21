@@ -5394,13 +5394,14 @@ def test_offline_locked_package_python_range_unrestricted(capsys, tmp_path, fake
 
 
 @pytest.mark.parametrize("lockname", ["uv.lock", "app.py.lock"])
-def test_uv_lock_online_ignores_python_upper_bound(capsys, tmp_path, fake_pypi, monkeypatch, lockname):
+@pytest.mark.parametrize("requires_python", [">=3.10,<3.15", "==3.14.*", "~=3.14.0", ">=3.10,!=3.15.*"])
+def test_uv_lock_online_uses_python_lower_bound(capsys, tmp_path, fake_pypi, monkeypatch, lockname, requires_python):
     from conftest import FAKE_INDEX
 
     from wheelgap import check_lockfile, make_targets
 
     filename = "purewheel-3.1-py3-none-any.whl"
-    monkeypatch.setitem(FAKE_INDEX, "purewheel", {"3.1": [{"filename": filename, "requires_python": ">=3.10,<3.15"}]})
+    monkeypatch.setitem(FAKE_INDEX, "purewheel", {"3.1": [{"filename": filename, "requires_python": requires_python}]})
     lock = tmp_path / lockname
     manifest = '[manifest]\nrequirements = [{ name = "purewheel" }]\n' if lockname.endswith(".py.lock") else ""
     lock.write_text(
@@ -5416,11 +5417,11 @@ def test_uv_lock_online_ignores_python_upper_bound(capsys, tmp_path, fake_pypi, 
     _assert_matches_output_schema(json.loads(out))
     package = json.loads(out)["packages"][0]
     assert package["results"] == {"linux-x86_64": "wheel"}
-    assert package["pip_refuses"] == {filename: "requires Python >=3.10,<3.15"}
+    assert package["pip_refuses"] == {filename: f"requires Python {requires_python}"}
     assert "note: 1 package is checked as uv installs it, though pip would refuse it" in err
     assert (
-        "purewheel 3.1 on linux-x86_64: checked as uv installs it (uv ignores Requires-Python upper bounds); "
-        "pip refuses it: requires Python >=3.10,<3.15"
+        "purewheel 3.1 on linux-x86_64: checked as uv installs it (uv checks the Requires-Python lower bound); "
+        f"pip refuses it: requires Python {requires_python}"
     ) in run(capsys, *args, "--online", "--explain")[1]
     targets = make_targets("3.15", "linux-x86_64")
     result = check_lockfile(lock, targets, online=True)[0]
@@ -5466,13 +5467,36 @@ def test_uv_lock_online_python_upper_bound_is_per_python(capsys, tmp_path, fake_
         ("<=3.14", "3.15", True),
         ("<3.15", "3.14", False),
         (">=3.10,<3.15", "3.9", False),
-        ("==3.14.*,<3.15", "3.15", False),
-        ("~=3.13.0,<3.15", "3.15", False),
-        ("!=3.15.*,<3.15", "3.15", False),
+        ("==3.14.*", "3.15", True),
+        ("==3.16.*", "3.15", False),
+        (">=3.16", "3.15", False),
+        ("==3.14.*,<3.15", "3.15", True),
+        ("~=3.14.0", "3.15", True),
+        ("~=3.16.0", "3.15", False),
+        ("~=3.13.0,<3.15", "3.15", True),
+        ("!=3.15.*", "3.15", True),
+        ("!=3.15.*,<3.15", "3.15", True),
+        (">=3.10,!=3.15.*", "3.15", True),
+        (">=3.15,!=3.15.*", "3.15", False),
+        (">=3.14,!=3.14.*,!=3.15.*", "3.15", False),
+        (">=3.14,!=3.14.*,<3.16", "3.15", False),
+        (">=3.15.99,!=3.15.99", "3.15", False),
+        (">=3.16,<3.12", "3.15", True),
+        ("==3.14,!=3.14", "3.15", True),
+        # Checked against uv 0.13.9 itself (uv pip install --dry-run on wheels with these Requires-Python).
+        ("==3.14.*", "3.13", False),
+        ("~=3.14.0", "3.13", False),
+        ("~=3.13.0", "3.15", True),
+        ("==3.14", "3.15", True),
+        ("===3.14", "3.15", True),
+        ("==3.15.0", "3.15", True),
+        # pip takes these, so there is nothing for uv to restore.
+        (">=3.10,!=3.15.*", "3.14", False),
+        ("!=3.15.*", "3.14", False),
         ("invalid", "3.15", False),
     ],
 )
-def test_uv_ignores_only_explicit_python_upper_bounds(requires, python, ignores):
+def test_uv_ignores_python_rejection_when_lower_bound_allows(requires, python, ignores):
     from wheelgap.sources import uv_ignores_python_rejection
 
     assert uv_ignores_python_rejection(requires, python) is ignores

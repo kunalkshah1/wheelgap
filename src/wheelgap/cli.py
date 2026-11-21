@@ -1304,7 +1304,7 @@ def render_markdown(
     dropped: dict[str, str] | None = None,
     issues_urls: dict[int, str | None] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
-    fix_hint: bool = False,
+    fix_hint: str | None = None,
 ) -> list[str]:
     """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment)."""
     plain = Style(False)
@@ -1401,7 +1401,7 @@ def render_markdown(
             if sug_lines:
                 out += [*sug_lines, ""]
     if fix_hint:
-        out += [FIX_HINT, ""]
+        out += [fix_hint, ""]
     return out
 
 
@@ -2437,7 +2437,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         what, it = ("package is", "it") if pip_refusals == 1 else ("packages are", "them")
         print(
             f"wheelgap: note: {pip_refusals} {what} checked as uv installs {it}, though pip would refuse {it}: "
-            "uv ignores Requires-Python upper bounds (the text report's --explain says which, and --json lists "
+            "uv checks the Requires-Python lower bound (the text report's --explain says which, and --json lists "
             "the files in pip_refuses)",
             file=sys.stderr,
         )
@@ -2589,14 +2589,18 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         if args.fix
         else None
     )
-    fix_hint = (
-        not args.fix
-        and not args.json
-        and not quiet
-        and not offline
-        and origin.other_index(index_url) is None
-        and bool(gap_wheel_candidates(gaps, targets, sources, index_url)[1])
-    )
+    # The hint never makes a request: it reads only the list a --fix run left in the cache (kept for
+    # cache.GAP_WHEELS_MAX_AGE), and only when a gap could use it. No hint when that list fills nothing; that is
+    # silence, not "nothing fits": --fix itself fetches the list again before it says so (gap_wheel_fills).
+    fix_hint = None
+    if not (args.fix or args.json or quiet or offline) and origin.other_index(index_url) is None:
+        _, hint_rows, source_of, private = gap_wheel_candidates(gaps, targets, sources, index_url)
+        if hint_rows:
+            wheels = gapwheels.look_up_cached()[0] if cached["read_cache"] else None
+            if wheels is None:
+                fix_hint = FIX_HINT
+            elif count := len(gapwheels.fillable(hint_rows, targets, source_of, wheels, private, index_url)):
+                fix_hint = f"Run with --fix: wheelgap's gap wheel index has a wheel for {count} of these gaps."
 
     if args.print_gap_wheel_snippet:  # one input of gapwheels.SNIPPET_KINDS, checked when it was read
         multi_py = len({t.python for t in targets}) > 1
@@ -2817,7 +2821,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 for why in dict.fromkeys(r.package.pip_refuses.values()):
                     print(
                         f"{r.package.name} {r.package.version} on {affected}: checked as uv installs it "
-                        f"(uv ignores Requires-Python upper bounds); pip refuses it: {why}"
+                        f"(uv checks the Requires-Python lower bound); pip refuses it: {why}"
                     )
         print()
 
@@ -2840,7 +2844,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     if not args.explain:
         print(style.dim("Run with --explain to see which wheels were rejected and why."))
     if fix_hint:
-        print(style.dim(FIX_HINT))
+        print(style.dim(fix_hint))
     if source_allowed and not args.exit_zero:
         print(style.dim("Source builds are allowed (--fail-on missing), so this run passes."))
     for ln in fix_lines:  # a gap wheel fills only a gap, so the runs that return early above have none
