@@ -97,11 +97,11 @@ Other inputs have no dependency graph, so they show no path. If you think wheelg
 (or `--json --explain`) is all a bug report needs, with no need to share your lockfile.
 
 For a `uv.lock` checked with `--online`, `--explain` also names (after 0.13.0) each package that uv installs and pip
-would refuse (uv ignores `Requires-Python` upper bounds; see [uv.lock](inputs.md#uvlock)), whether or not it has a
+would refuse (uv checks the `Requires-Python` lower bound; see [uv.lock](inputs.md#uvlock)), whether or not it has a
 gap:
 
 ```text
-agent-client-protocol 0.11.1 on linux-x86_64: checked as uv installs it (uv ignores Requires-Python upper bounds); pip refuses it: requires Python <3.15,>=3.10
+agent-client-protocol 0.11.1 on linux-x86_64: checked as uv installs it (uv checks the Requires-Python lower bound); pip refuses it: requires Python <3.15,>=3.10
 ```
 
 When the package comes from PyPI and publishes an issue tracker in its metadata (or a GitHub repository fallback),

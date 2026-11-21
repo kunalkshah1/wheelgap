@@ -280,14 +280,60 @@ def pythons_outside_lock(source: Source, targets: Iterable[Target], *, bounds_on
 
 
 def uv_ignores_python_rejection(requires: str, python: str) -> bool:
-    """Whether the target misses only an explicit upper bound, using the index check's late-patch version."""
+    """Whether uv accepts a file that the index check rejected for this Python."""
+    # uv compares the lower edge of the complete release-only range:
+    # https://github.com/astral-sh/uv/blob/0.13.9/crates/uv-distribution-types/src/requires_python.rs#L246-L275
     try:
         spec = SpecifierSet(requires)
-        if any(clause.operator not in {"<", "<=", ">", ">=", "=="} or clause.version.endswith(".*") for clause in spec):
+        target = Version(f"{python}.99")
+        if spec.contains(target):
             return False
-        version = f"{python}.99"
-        lower = SpecifierSet(",".join(str(clause) for clause in spec if clause.operator not in {"<", "<="}))
-        return not spec.contains(version) and lower.contains(version)
+
+        # At equal versions an exclusive lower bound is higher than an inclusive one,
+        # so tuple comparison can pick the stricter bound.
+        lower: tuple[Version, bool] | None = None
+        upper: tuple[Version, bool] | None = None
+        exclusions: list[tuple[Version, Version | None]] = []
+        for clause in spec:
+            prefix = clause.version.endswith(".*")
+            version = Version(clause.version.removesuffix(".*"))
+            release = Version(version.base_version)
+            operator = clause.operator
+            successor = release
+            if prefix or operator == "~=":
+                segments = release.release if prefix else release.release[:-1]
+                successor = Version(".".join(map(str, (*segments[:-1], segments[-1] + 1))))
+                if prefix and version.epoch:
+                    successor = Version(f"{version.epoch}!{successor}")
+            if operator == "!=":
+                exclusions.append((release, successor if prefix else None))
+                continue
+            if operator in {">", ">=", "==", "===", "~="}:
+                candidate = (release, operator == ">")
+                lower = candidate if lower is None else max(lower, candidate)
+            if operator in {"<", "<=", "==", "===", "~="}:
+                candidate = (
+                    successor,
+                    operator in {"<=", "==", "==="} and not prefix,
+                )
+                upper = candidate if upper is None else min(upper, candidate)
+
+        if lower is None:
+            return True
+
+        for start, end in sorted(exclusions, key=lambda interval: interval[0]):
+            if start > lower[0]:
+                break
+            if end is None:
+                if start == lower[0]:
+                    lower = (start, True)
+            elif end > lower[0]:
+                lower = (end, False)
+
+        # uv treats an empty intersection as having no lower bound.
+        if upper is not None and (lower[0] > upper[0] or (lower[0] == upper[0] and (lower[1] or not upper[1]))):
+            return True
+        return lower <= (target, False)
     except (InvalidSpecifier, InvalidVersion):
         return False
 
