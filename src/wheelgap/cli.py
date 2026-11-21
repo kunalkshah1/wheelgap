@@ -2443,7 +2443,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         what, it = ("package is", "it") if pip_refusals == 1 else ("packages are", "them")
         print(
             f"wheelgap: note: {pip_refusals} {what} checked as uv installs {it}, though pip would refuse {it}: "
-            "uv ignores Requires-Python upper bounds (the text report's --explain says which, and --json lists "
+            "uv checks the Requires-Python lower bound (the text report's --explain says which, and --json lists "
             "the files in pip_refuses)",
             file=sys.stderr,
         )
@@ -2801,7 +2801,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 for why in dict.fromkeys(r.package.pip_refuses.values()):
                     print(
                         f"{r.package.name} {r.package.version} on {affected}: checked as uv installs it "
-                        f"(uv ignores Requires-Python upper bounds); pip refuses it: {why}"
+                        f"(uv checks the Requires-Python lower bound); pip refuses it: {why}"
                     )
         print()
 

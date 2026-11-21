@@ -23,13 +23,14 @@ Add `set -o pipefail` when you pipe the output, so input errors still fail.
 
 ## Text
 
+<!-- sample: uvproj -p 3.13 -t linux-aarch64,musl-aarch64 -->
 ```text
 wheelgap 0.13.0 · uv.lock · 5 packages · Python 3.13
 
-package    version  linux-aarch64  musl-aarch64
-fastlib    2.0.0    ● source       ● source
-nativeext  0.3      ● source       ● source
-puresdist  1.0      ● source       ● source
+package                  version  linux-aarch64  musl-aarch64
+fastlib                  2.0.0    ● source       ● source
+nativeext (via fastlib)  0.3      ● source       ● source
+puresdist                1.0      ● source       ● source
 
 2 packages with wheels for every target hidden (--all to show)
 skipped 2 non-index packages: demo (editable), gitdep (git)
@@ -97,11 +98,11 @@ Other inputs have no dependency graph, so they show no path. If you think wheelg
 (or `--json --explain`) is all a bug report needs, with no need to share your lockfile.
 
 For a `uv.lock` checked with `--online`, `--explain` also names (after 0.13.0) each package that uv installs and pip
-would refuse (uv ignores `Requires-Python` upper bounds; see [uv.lock](inputs.md#uvlock)), whether or not it has a
+would refuse (uv checks the `Requires-Python` lower bound; see [uv.lock](inputs.md#uvlock)), whether or not it has a
 gap:
 
 ```text
-agent-client-protocol 0.11.1 on linux-x86_64: checked as uv installs it (uv ignores Requires-Python upper bounds); pip refuses it: requires Python <3.15,>=3.10
+agent-client-protocol 0.11.1 on linux-x86_64: checked as uv installs it (uv checks the Requires-Python lower bound); pip refuses it: requires Python <3.15,>=3.10
 ```
 
 When the package comes from PyPI and publishes an issue tracker in its metadata (or a GitHub repository fallback),
@@ -460,8 +461,8 @@ them (`{"win-arm64": ["mcp", "httpx"]}`). `direct` has entries only for uv.lock,
 leaves out a target where the package is itself a direct dependency, and may leave one out when the lockfile doesn't
 record which direct dependency asked for an extra that leads to the package (Poetry 1.x).
 
-For a `uv.lock` checked with `--online`, a package with files that uv installs and pip would refuse (uv ignores
-`Requires-Python` upper bounds) also gets `pip_refuses` (after 0.13.0), with or without `--explain`: those files, each
+For a `uv.lock` checked with `--online`, a package with files that uv installs and pip would refuse (uv checks only
+the `Requires-Python` lower bound) also gets `pip_refuses` (after 0.13.0), with or without `--explain`: those files, each
 mapped to the reason, as in `{"agent_client_protocol-0.11.1-py3-none-any.whl": "requires Python <3.15,>=3.10"}`. Its
 `results` are still uv's. See [uv.lock](inputs.md#uvlock).
 
