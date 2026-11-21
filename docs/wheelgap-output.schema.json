@@ -21,9 +21,16 @@
                 "additionalProperties": false,
                 "required": ["dockerfile", "line", "file"],
                 "properties": {
-                    "dockerfile": {"type": "string"},
-                    "line": {"type": "integer", "minimum": 1},
-                    "file": {"type": "string"}
+                    "dockerfile": {"type": "string", "description": "The --dockerfile path as given."},
+                    "line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The line the installing RUN starts on, from 1."
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "The requirements file, relative to the build context, with / separators."
+                    }
                 }
             }
         },

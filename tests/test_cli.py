@@ -3366,6 +3366,23 @@ def test_dockerfile_input_provenance_names_the_line_a_continued_run_starts_on(ca
     assert "nowheels 0.9 builds from source on linux-x86_64 (installed by docker/Dockerfile:6)." in err
 
 
+def test_dockerfile_inputs_file_is_relative_to_the_build_context(capsys, fake_pypi, tmp_path, monkeypatch):
+    # The Dockerfile's folder is the build context, given or not, and absolute or not: `file` is the same.
+    monkeypatch.chdir(tmp_path)
+    Path("docker/reqs").mkdir(parents=True)
+    Path("docker/Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.13-slim\nWORKDIR /app\nCOPY reqs/base.txt ./\n"
+        "RUN pip install -r base.txt\n",
+        encoding="utf-8",
+    )
+    Path("docker/reqs/base.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    for context in ([], ["--dockerfile-context", str(tmp_path / "docker")]):
+        _, out, _ = run(capsys, "--dockerfile", "docker/Dockerfile", "--dockerfile-inputs", "--json", *context)
+        report = json.loads(out)
+        _assert_matches_output_schema(report)
+        assert report["dockerfile_inputs"] == [{"dockerfile": "docker/Dockerfile", "line": 4, "file": "reqs/base.txt"}]
+
+
 def test_no_dockerfile_inputs_key_without_the_flag(capsys, fake_pypi, dockerfile_provenance_inputs):
     _, out, err = run(capsys, "requirements.txt", "--dockerfile", "Dockerfile", "--json", "--github-annotations")
     assert "dockerfile_inputs" not in json.loads(out) and "installed by" not in err

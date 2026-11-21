@@ -2683,8 +2683,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 issues_urls=issues_urls,
                 gap_wheels=fills,
                 pi_wheels=pi_wheels,
+                # As the Dockerfile's COPY names it: relative to the build context, with /, whatever the OS, the
+                # working directory or the way the context was given.
                 dockerfile_inputs=[
-                    {"dockerfile": args.dockerfile, "line": line, "file": str(path)} for line, path in installs
+                    {"dockerfile": args.dockerfile, "line": line, "file": path.relative_to(context_dir).as_posix()}
+                    for line, path in installs
                 ]
                 if args.dockerfile_inputs
                 else None,
