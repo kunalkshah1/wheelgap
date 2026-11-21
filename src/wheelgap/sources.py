@@ -2130,7 +2130,8 @@ def _finalize_requirements(
 def _cycle_error(path: Path, line: str, target_path: Path, stack: list[Path]) -> SourceError:
     # Names in the chain are relative to the folder the run started in, so two files with the same
     # name in different folders stay distinguishable (a file outside that folder is ../name). Forward slashes
-    # on every platform, as the include lines themselves are written.
+    # on every platform, as the include lines themselves are written. The chain names files as they were
+    # written, so a cycle through a link names the link, as pip names it.
     base = stack[0].parent
 
     def show(p: Path) -> str:
@@ -2161,12 +2162,22 @@ def _read_requirements(
     --extra-index-url, --find-links, --no-index), includes that aren't read, and abbreviated include options.
     `req_lines` collects requirement lines that aren't constraints, for --deps; `compiler_signs` notes the
     `--hash` options and `# via` comments that mark pip-compile output, in requirement files only.
-    `stack` is the chain of files being read, `-r` and `-c` together, as pip keeps it."""
-    path = path.resolve()
+    `stack` is the chain of files being read, `-r` and `-c` together, as pip keeps it: by the path each
+    file was named with.
+
+    A file is read through the folder it was named in (`os.path.abspath`, no symlink resolution), as pip
+    reads it, so an include in a symlinked file resolves against the link's folder, not the target's.
+    An include is a cycle when that named path is already in `stack`, which is pip's rule: one shared
+    file linked into two folders may be on the chain under both names, since its includes are other files
+    each time. The "already read" identity is the resolved path instead: a file reached by two names
+    lists its own lines once (pip would list them twice), but its includes are followed again, from the
+    folder of the new name."""
+    path = Path(os.path.abspath(path))
+    resolved = path.resolve()
     if stack is None:
         stack = []
-    already_seen = path in seen[constraint]
-    seen[constraint].add(path)
+    already_seen = resolved in seen[constraint]
+    seen[constraint].add(resolved)
     stack.append(path)
     pkgs: list[Package] = []
     try:
@@ -2206,7 +2217,9 @@ def _read_requirements(
                 # A URL (-c https://releases.openstack.org/...) or ${VAR} is left to pip: it's skipped, as before.
                 # Unread, it may name an index, so the input isn't PyPI-only.
                 if "://" not in target and "${" not in target:
-                    target_path = (path.parent / target).resolve()
+                    # The include is read from the including file's folder as named, and that named
+                    # path is what the cycle check compares, as pip does.
+                    target_path = Path(os.path.abspath(path.parent / target))
                     if target_path in stack:
                         # An include naming a file already being read is an error, as pip refuses it:
                         # the chain is one chain for -r and -c together, so a loop through a
@@ -2232,7 +2245,7 @@ def _read_requirements(
                     index_options.append(line)
                 continue
             if include:  # -r file, -rfile, --requirement file, --requirement=file, after other options too
-                target_path = (path.parent / include[1]).resolve()
+                target_path = Path(os.path.abspath(path.parent / include[1]))
                 if target_path in stack:
                     raise _cycle_error(path, line, target_path, stack)
                 pkgs.extend(

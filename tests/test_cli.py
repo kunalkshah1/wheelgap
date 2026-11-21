@@ -3057,6 +3057,33 @@ def test_github_annotations_requirements(capsys, fake_pypi, tmp_path, monkeypatc
     ]
 
 
+def test_github_annotations_symlinked_requirements_file(capsys, fake_pypi, tmp_path, monkeypatch):
+    # The requirements file is a link into real/, and both folders have a base.txt: the annotation for the
+    # package pip reads (nowheels, from link/base.txt) is on link/base.txt, not real/base.txt (#604). The linked
+    # file's own line is on the file the link points to: git keeps link/reqs.txt as a link, so it has no line 2.
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").mkdir()
+    (tmp_path / "real" / "reqs.txt").write_text("-r base.txt\nranged==1.9\n", encoding="utf-8")
+    (tmp_path / "real" / "base.txt").write_text("psycopg2==2.9.11\n", encoding="utf-8")
+    (tmp_path / "link" / "base.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    try:
+        # A Path, so that Windows gets backslashes: a link written with forward slashes can't be opened there.
+        (tmp_path / "link" / "reqs.txt").symlink_to(Path("../real/reqs.txt"))
+    except OSError:
+        pytest.skip("symlinks aren't available here")
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    code, out, _ = run(
+        capsys, str(tmp_path / "link" / "reqs.txt"), "-p", "3.13", "-t", "linux-x86_64", "--github-annotations"
+    )
+    assert code == 1
+    assert annotation_lines(out) == [
+        "::error file=link/base.txt,line=1,title=nowheels 0.9%3A builds from source::"
+        "nowheels 0.9 builds from source on linux-x86_64.",
+        "::error file=real/reqs.txt,line=2,title=ranged 1.9%3A builds from source::"
+        "ranged 1.9 builds from source on linux-x86_64.",
+    ]
+
+
 def test_github_annotations_deps_keeps_a_direct_requirements_line(index, capsys, tmp_path, monkeypatch):  # noqa: F811
     # --deps checks the resolved tree, but a direct requirement's gap is still on its own line (#432).
     # app pulls in more than the file names (and crypt again, through lib[crypto]): crypt is still its own line's.
