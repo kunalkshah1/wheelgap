@@ -172,7 +172,7 @@ for `check_dist` the nearest folder above the dist folder with a
 | `ios` | string | `[tool.wheelgap] ios`, else `13.0` | Oldest iOS version to support, e.g. '15.0'. |
 | `android_api` | string | `[tool.wheelgap] android-api`, else `24` | Minimum Android API level to support, e.g. '26'. |
 | `pyodide_lock` | string | `[tool.wheelgap] pyodide-lock` (when a pyodide target is checked) | Absolute path or https URL of a Pyodide release's `pyodide-lock.json`. |
-| `offline` | boolean | `[tool.wheelgap] offline`, else `false` | `true` uses only files recorded in the lockfile and never contacts the index. `false` rechecks on the index and overrides `offline = true` in the project for this call. Omit to use the project's default. |
+| `offline` | boolean | `[tool.wheelgap] offline`, else `false` | `true` uses only files recorded in the lockfile and never contacts the index. `false` (after 0.13.0; before, the same as leaving it out) rechecks on the index, as `--online` does, and overrides `offline = true` in the project for this call. Omit to use the project's default. |
 | `dependencies` | boolean | `false` | Resolve transitive dependencies of requirements files, a conda `environment.yml`, `pyproject.toml` and a script's `# /// script` block with `--deps`; each gap gets `via` and `direct`. Refused for lockfiles, offline and another index. |
 | `extras` | array of strings | `[tool.wheelgap] extras`, else every extra of a `uv.lock` or `poetry.lock`, none of a `pyproject.toml` | Install these extras, as `--extra NAME`: a uv or Poetry project extra, or a `pyproject.toml` `[project] optional-dependencies` group. Not for `pdm.lock`. |
 | `all_extras` | boolean | `false` | Install every extra, as `--all-extras` (`uv.lock`, `poetry.lock`, `pyproject.toml`). |

@@ -706,6 +706,123 @@ def test_check_lockfile_conflicting_selection_names_arguments(fixtures):
     assert not re.search(r"(^|\s)--[a-z]", message)
 
 
+def test_check_lockfile_unknown_group_names_no_flag(fixtures):
+    lock = fixtures / "uvselect" / "uv.lock"
+    (_, reply) = run(init(), call("check_lockfile", path=str(lock), python="3.13", offline=True, groups=["nope"]))
+    assert reply["result"]["isError"] is True
+    message = reply["result"]["content"][0]["text"]
+    assert "unknown groups: nope" in message
+    assert not re.search(r"(^|\s)--[a-z]", message)
+
+
+def test_check_lockfile_offline_false_note_about_pip_names_no_flag(fake_pypi, tmp_path, monkeypatch):
+    """offline: false on a uv.lock is --online: its note about files pip would refuse points at --explain and --json."""
+    filename = "purewheel-3.1-py3-none-any.whl"
+    monkeypatch.setitem(FAKE_INDEX, "purewheel", {"3.1": [{"filename": filename, "requires_python": ">=3.10,<3.15"}]})
+    lock = tmp_path / "uv.lock"
+    lock.write_text(
+        'version = 1\nrequires-python = ">=3.12"\n\n[[package]]\n'
+        'name = "purewheel"\nversion = "3.1"\nsource = {registry = "https://pypi.org/simple"}\n'
+        f'wheels = [{{url = "https://files.pythonhosted.org/{filename}"}}]\n',
+        encoding="utf-8",
+    )
+    arguments = {"path": str(lock), "python": "3.15", "targets": ["linux-x86_64"]}
+    (_, reply) = run(init(), call("check_lockfile", offline=False, **arguments))
+    data = reply["result"]["structuredContent"]
+    assert data["ok"] is True
+    (note,) = [note for note in data["notes"] if "pip would refuse" in note]
+    assert note.endswith("(a package with a gap lists the files in its pip_refuses)")
+    assert all(not re.search(r"(^|\s)--[a-z]", note) for note in data["notes"])
+    # Left out, the lock is checked as before: on its own files, with nothing to say about pip.
+    (_, reply) = run(init(), call("check_lockfile", **arguments))
+    assert not any("pip would refuse" in note for note in reply["result"]["structuredContent"]["notes"])
+
+
+@pytest.mark.parametrize(
+    ("message", "lockfile", "translated"),
+    [
+        # Each is a message of the command line, as cli.py, offline.py and dockerfile.py word it.
+        (
+            "offline = true in [tool.wheelgap]: --deps would look packages up on PyPI; drop --deps, or pass --online "
+            "for this run",
+            True,
+            "offline = true in [tool.wheelgap]: the dependencies argument would look packages up on PyPI; call "
+            "without dependencies: true, or call again with offline: false",
+        ),
+        (
+            "--offline: requirements.txt needs the index for 1 package (zstandard); use a lockfile that lists each "
+            "package's files, or drop --offline",
+            True,
+            "offline: true: requirements.txt needs the index for 1 package (zstandard); use a lockfile that lists "
+            "each package's files, or call without offline: true",
+        ),
+        (
+            "note: --online looks up PyPI packages only; kept the locked files of 2 packages from other indexes",
+            True,
+            "note: offline: false looks up PyPI packages only; kept the locked files of 2 packages from other indexes",
+        ),
+        (
+            "note: uv.lock was checked; pixi.lock is in the same folder too (pass it, or --environment, to check it "
+            "instead)",
+            True,
+            "note: uv.lock was checked; pixi.lock is in the same folder too (pass it, or the environment argument, "
+            "to check it instead)",
+        ),
+        # check_dockerfile and check_dist have no offline or dependencies argument to point at.
+        (
+            "offline = true in [tool.wheelgap]: --fix would read the gap wheel list from wheelgap.github.io; drop "
+            "--fix, or pass --online for this run",
+            False,
+            "offline = true in [tool.wheelgap]: the fix argument would read the gap wheel list from "
+            "wheelgap.github.io; call without fix: true, or set offline = false in [tool.wheelgap]",
+        ),
+        (
+            "note: pyproject.toml lists direct dependencies only; their own dependencies aren't checked (use a "
+            "lockfile for that, or add --deps for PyPI)",
+            False,
+            "note: pyproject.toml lists direct dependencies only; their own dependencies aren't checked (use a "
+            "lockfile for that, or use check_lockfile with dependencies: true for PyPI)",
+        ),
+        (
+            "offline = true in [tool.wheelgap]: --dist looks the last release up on PyPI; drop --dist, or set "
+            "offline = false in [tool.wheelgap] (or drop the key)",
+            False,
+            "offline = true in [tool.wheelgap]: check_dist looks the last release up on PyPI; set offline = false "
+            "in [tool.wheelgap] (or drop the key)",
+        ),
+        (
+            "note: Dockerfile: FROM uses --build-arg PYTHON_VERSION=3.13",
+            False,
+            "note: Dockerfile: FROM uses build_args PYTHON_VERSION=3.13",
+        ),
+        (
+            "Dockerfile:1: ARG TAG has no default and no --build-arg TAG=VALUE, pass -p/-t instead",
+            False,
+            "Dockerfile:1: ARG TAG has no default and no build_args TAG=VALUE, use check_lockfile with python and "
+            "targets instead",
+        ),
+        (
+            "python:3.9 is on a Debian release older than bullseye: pass -t and --glibc instead",
+            False,
+            "python:3.9 is on a Debian release older than bullseye: use check_lockfile with targets and glibc instead",
+        ),
+        (
+            "--extra, --all-extras, --group, --only-group and --no-dev don't apply to a script",
+            True,
+            "extras, all_extras, groups, only_groups and no_dev don't apply to a script",
+        ),
+        ("note: --ignore matches no package: foo", True, "note: ignore in [tool.wheelgap] matches no package: foo"),
+        # Not the command line's flags: a file's own options, a longer flag, and paths. They stay as they are.
+        ("requirements.txt:2: --extra-index-url and --no-deps aren't read", True, None),
+        ("Dockerfile:1: duplicate --platform flag", False, None),
+        ("/srv/--fix/uv.lock: no such file or directory", True, None),
+        ("C:\\srv\\--deps\\uv.lock: invalid TOML", True, None),
+    ],
+)
+def test_cli_advice_is_translated_for_the_calling_tool(message, lockfile, translated):
+    assert mcp._translate_cli_message(message, lockfile=lockfile) == (translated or message)
+
+
 def test_check_lockfile_ignores_from_config(fake_pypi, tmp_path, fixtures):
     (tmp_path / "uv.lock").write_bytes((fixtures / "uvproj" / "uv.lock").read_bytes())
     (tmp_path / "pyproject.toml").write_text(
@@ -1039,8 +1156,8 @@ def test_check_dockerfile_inputs_refused_line_is_a_tool_error_with_its_line(fake
     (_, reply) = run(init(), call("check_dockerfile", dockerfile=str(dockerfile), inputs=True))
     assert reply["result"]["isError"] is True
     text = reply["result"]["content"][0]["text"]
-    assert f"{dockerfile}:4: pip install .: the inputs argument only reads requirements files" in text
-    assert not re.search(r"(^|\s)--[a-z]", text)
+    # -r FILE and --no-cache-dir are pip's own options, in the Dockerfile's words: they stay.
+    assert f"{dockerfile}:4: pip install .: the inputs argument only reads -r FILE and --no-cache-dir" in text
     assert "--dockerfile-inputs" not in text  # the CLI's flag isn't an argument here
     assert not fake_pypi
 

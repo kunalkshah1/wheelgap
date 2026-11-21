@@ -813,7 +813,7 @@ def _check_lockfile(args: dict[str, Any]) -> dict[str, Any]:
         argv += ["--deps", "--explain", "--no-suggest", "--no-notes", "--no-build-info"]
     if fix:
         argv.append("--fix")
-    return _run_cli(argv, path, supports_offline=True)
+    return _run_cli(argv, path, lockfile=True)
 
 
 def _check_dockerfile(args: dict[str, Any]) -> dict[str, Any]:
@@ -1017,14 +1017,26 @@ _EXPLAIN_ONLY = frozenset(
 )
 
 
+# The command line's advice in words an MCP client can act on: it has arguments, not flags (#607). Every error and
+# note of the tools that run the command line goes through this table. Only whole flags match (not --extra-index-url,
+# nor a path such as /srv/--fix/uv.lock), and what a Dockerfile or requirements file itself says (FROM --platform,
+# COPY --chown, pip's own options) is left alone.
 _CLI_ADVICE = {
     "pass --online for this run": "call again with offline: false",
-    "drop --offline": "call again with offline: false",
+    "drop --offline": "call without offline: true",
     "drop --deps": "call without dependencies: true",
     "add --deps": "call with dependencies: true",
     "drop --fix": "call without fix: true",
+    # check_dist is the tool itself, so there is nothing to drop: the other way out is all that's left.
+    "drop --dist, or set": "set",
     "pass -p/-t instead": "use check_lockfile with python and targets instead",
+    "pass -t and --glibc instead": "use check_lockfile with targets and glibc instead",
     "pass --build-arg if the build sets one": "pass build_args if the build supplies a value",
+    # A uv.lock checked with offline: false. The tools have no text report, and return pip_refuses with a gap only.
+    "(the text report's --explain says which, and --json lists the files in pip_refuses)": (
+        "(a package with a gap lists the files in its pip_refuses)"
+    ),
+    "--online": "offline: false",
     "--offline": "offline: true",
     "--deps": "the dependencies argument",
     "--fix": "the fix argument",
@@ -1033,22 +1045,32 @@ _CLI_ADVICE = {
     "--group": "groups",
     "--only-group": "only_groups",
     "--no-dev": "no_dev",
+    "--environment": "the environment argument",
+    "--build-arg": "build_args",
     "--dockerfile-inputs": "the inputs argument",
     "--dockerfile-context": "the context argument",
     "--dist": "check_dist",
     "--ignore": "ignore in [tool.wheelgap]",
     "(--index-url, or index-url in [tool.wheelgap])": "(index-url in [tool.wheelgap])",
-    "-r FILE and --no-cache-dir": "requirements files and pip's no-cache-dir option",
 }
-_CLI_ADVICE_RE = re.compile(r"(?<![\w/-])(?:" + "|".join(map(re.escape, _CLI_ADVICE)) + r")(?![\w/-])")
+# The same advice from a tool that has no offline, dependencies or environment argument (check_dockerfile, check_dist).
+_CLI_ADVICE_ELSEWHERE = {
+    "pass --online for this run": "set offline = false in [tool.wheelgap]",
+    "add --deps": "use check_lockfile with dependencies: true",
+    "--environment": "check_lockfile's environment argument",
+}
+# A backslash before a flag is a Windows path (C:\srv\--fix\uv.lock), as / is elsewhere.
+_CLI_ADVICE_RE = re.compile(r"(?<![\w/\\-])(?:" + "|".join(map(re.escape, _CLI_ADVICE)) + r")(?![\w/\\-])")
 
 
-def _translate_cli_message(message: str, *, supports_offline: bool = False) -> str:
+def _translate_cli_message(message: str, *, lockfile: bool = False) -> str:
+    """MESSAGE with the command line's flags as the calling tool's arguments. lockfile: the tool is check_lockfile,
+    which has the arguments the others lack."""
+
     def replace(match: re.Match[str]) -> str:
-        advice = _CLI_ADVICE[match[0]]
-        if advice == "call again with offline: false" and not supports_offline:
-            return "set offline = false in [tool.wheelgap]"
-        return advice
+        if not lockfile and match[0] in _CLI_ADVICE_ELSEWHERE:
+            return _CLI_ADVICE_ELSEWHERE[match[0]]
+        return _CLI_ADVICE[match[0]]
 
     return _CLI_ADVICE_RE.sub(replace, message)
 
@@ -1059,7 +1081,7 @@ def _run_cli(
     *,
     positional: bool = True,
     project: Path | None = None,
-    supports_offline: bool = False,
+    lockfile: bool = False,
 ) -> dict[str, Any]:
     """`wheelgap ARGV -- PATH` with --json in ARGV: its result as the lockfile tools return it. positional=False
     runs `wheelgap ARGV` with no input at all (check_dist: --dist takes none) and keeps PATH in the result; the
@@ -1079,7 +1101,7 @@ def _run_cli(
     except SystemExit as e:  # argparse rejected a value
         code = e.code if isinstance(e.code, int) else 2
     messages = [
-        _translate_cli_message(line.removeprefix("wheelgap: "), supports_offline=supports_offline)
+        _translate_cli_message(line.removeprefix("wheelgap: "), lockfile=lockfile)
         for line in err.getvalue().splitlines()
         if line.strip()
     ]

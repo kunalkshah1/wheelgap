@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- MCP notes and errors use tool argument names, and check_lockfile supports an explicit online override. (#624, thanks [@kunalkshah1](https://github.com/kunalkshah1))
+- The MCP server's `check_lockfile`, `check_dockerfile` and `check_dist` tools word their errors and notes for a client that has arguments, not flags: "pass `--online` for this run" is now "call again with offline: false", "drop `--deps`" is "call without dependencies: true", and `--fix`, `--group`, `--extra` and `--build-arg` are named as the `fix`, `groups`, `extras` and `build_args` arguments. `check_lockfile` with `offline: false` now overrides `offline = true` in the project for that call (it runs as `--online` does); leaving `offline` out keeps the project's setting. (#624, thanks [@kunalkshah1](https://github.com/kunalkshah1))
 - Requirements files: an include cycle (two files that include each other, or a file that includes itself, with `-r` or `-c`) is now an input error naming the chain, as pip refuses it, instead of being read once and reported as a clean result. (#616, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - The MCP server's tools keep the notes that explain an empty `gap_wheels` even when the project sets `quiet = true`, so a client can still tell "no wheel fills these gaps" from "wasn't checked" or "--fix is off with another index". (#617, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
 - `--github-annotations --fix` puts the full stop before the pip command instead of after it, so copying the command from an annotation no longer gives pip a version ending in a full stop. (#615, thanks [@Dikshant-Neupane](https://github.com/Dikshant-Neupane))
