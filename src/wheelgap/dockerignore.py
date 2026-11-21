@@ -78,6 +78,10 @@ def read_rules(path: Path) -> tuple[Rule, ...]:
                     raise ValueError  # the matcher cleans "!/" to a bare !
                 continue  # a rooted / cannot match a path relative to the context
             pattern = pattern.lstrip("/")
+            # The matcher (patternmatcher.New) cleans an exception with its ! still on, so `!../../a` loses the ! and
+            # becomes the rule `a`, which excludes.
+            if include and posixpath.normpath("!" + pattern) != "!" + pattern:
+                raise ValueError
             # The matcher trims and cleans each pattern once more (patternmatcher.New): whitespace that cleaning left
             # at an end (`./ a`) goes, and a pattern left starting with ! (`./!a`) becomes an exception.
             if pattern != pattern.strip(_SPACE) or (not include and pattern.startswith("!")):

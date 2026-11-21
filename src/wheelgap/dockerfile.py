@@ -1032,6 +1032,13 @@ def _read_copy(
             return unread(f"COPY {name}: not found in the build context ({context_label})")
         if not host.resolve().is_relative_to(root):
             return unread(f"COPY {name}: a symlink out of the build context isn't read by --dockerfile-inputs")
+        # A link is matched against the ignore rules by its own name, and what it points to by its: the rules may
+        # leave the target out of the build context, so the link dangles in the image.
+        if ignore_rules and (link := _symlink_below(host, context)) is not None:
+            return unread(
+                f"COPY {name}: {link.as_posix()} is a symlink, which --dockerfile-inputs doesn't read "
+                "when an ignore file has rules"
+            )
         is_dir = host.is_dir()
         if not is_dir and (rule := dockerignore.ignored(rel, ignore_rules)):
             return unread(f"COPY {name}: excluded from the build context by {rule}")
@@ -1070,6 +1077,12 @@ def _copied_file(copy: _Copy, target: str, context: Path, ignore_rules: tuple[do
                     "which --dockerfile-inputs doesn't read"
                 )
             if found.is_file():
+                # A folder COPY keeps a linked folder as a link, and the rules may leave out what it points to.
+                if ignore_rules and (link := _symlink_below(found, context)) is not None:
+                    raise DockerfileError(
+                        f"line {copy.line}: {link.as_posix()} is a symlink, which --dockerfile-inputs doesn't read "
+                        "when an ignore file has rules"
+                    )
                 relative = found.relative_to(context).as_posix()
                 if rule := dockerignore.ignored(relative, ignore_rules):
                     raise DockerfileError(

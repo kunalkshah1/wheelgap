@@ -1199,6 +1199,7 @@ def test_dockerfile_requirements_refuses_nested_includes(tmp_path):
     [
         (".git\n__pycache__/\n", None),
         ("deps\n!deps/requirements.txt\n", None),
+        ("deps/*\n!deps/requirements.txt\n", None),  # an ordinary exception below a folder is still one
         ("*.txt\n", None),  # a lone * does not cross a path separator
         ("**/requirement?.[t-v]xt\n", "**/requirement?.[t-v]xt"),
         ("**/requirements*.txt\n", "**/requirements*.txt"),
@@ -1240,6 +1241,8 @@ def test_dockerfile_requirements_dockerignore_matching(tmp_path, rules, excluded
         b"/!keep",
         b"./ requirements.txt",
         b"!requirements.txt /",
+        # ...and cleans an exception with its ! on: this one becomes the rule `requirements.txt`, which excludes.
+        b"!../../requirements.txt",
     ],
 )
 def test_dockerfile_requirements_refuses_unreadable_dockerignore(tmp_path, pattern):
@@ -1930,6 +1933,48 @@ def test_dockerfile_requirements_follows_an_include_a_later_rule_puts_back(tmp_p
     # ...and a rule after that one takes it out again.
     (tmp_path / ".dockerignore").write_bytes(b"*.txt\n!requirements.txt\n!base.txt\nbase.*\n")
     with pytest.raises(DockerfileError, match=r":3: COPY \.: base\.txt is excluded .* \.dockerignore:4 \('base\.\*'\)"):
+        dockerfile_requirements(path)
+
+
+def test_dockerfile_requirements_refuses_a_linked_folder_when_ignore_rules_exist(tmp_path):
+    path = _context(tmp_path, _COPY_ALL + "RUN pip install -r link/req.txt\n", ["realdir/req.txt"])
+    try:
+        (tmp_path / "link").symlink_to("realdir", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks aren't available here")
+    # The image gets realdir and the link to it, so pip reads link/req.txt.
+    assert dockerfile_requirements(path) == [(4, tmp_path / "link" / "req.txt")]
+    (tmp_path / ".dockerignore").write_bytes(b"# nothing is left out\n")
+    assert dockerfile_requirements(path) == [(4, tmp_path / "link" / "req.txt")]
+    # With realdir left out, /app/link points nowhere in the image and pip fails: realdir/req.txt isn't read.
+    (tmp_path / ".dockerignore").write_bytes(b"realdir\n")
+    with pytest.raises(
+        DockerfileError, match=":3: link is a symlink, which --dockerfile-inputs doesn't read when an ignore file has"
+    ):
+        dockerfile_requirements(path)
+
+
+def test_dockerfile_requirements_refuses_a_linked_file_when_ignore_rules_exist(tmp_path):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt ./\nRUN pip install -r requirements.txt\n",
+        ["requirements.txt", "real.txt"],
+    )
+    requirements = tmp_path / "requirements.txt"
+    requirements.unlink()
+    try:
+        requirements.symlink_to("real.txt")
+    except OSError:
+        pytest.skip("symlinks aren't available here")
+    assert dockerfile_requirements(path) == [(4, requirements)]
+    (tmp_path / ".dockerignore").write_bytes(b"# nothing is left out\n")
+    assert dockerfile_requirements(path) == [(4, requirements)]
+    # The link is matched by its own name, but what it points to isn't in the build context.
+    (tmp_path / ".dockerignore").write_bytes(b"real.txt\n")
+    with pytest.raises(
+        DockerfileError,
+        match=r":3: COPY requirements\.txt: requirements\.txt is a symlink, .* when an ignore file has rules",
+    ):
         dockerfile_requirements(path)
 
 

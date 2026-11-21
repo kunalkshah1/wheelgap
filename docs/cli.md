@@ -121,10 +121,13 @@ A `.dockerignore` is read as BuildKit reads it (**after 0.13.0**; 0.13.0 refuses
 build context. A requirements or constraints file that the rules leave out of the context, or a file one of them
 includes with `-r` or `-c`, is an error naming its `COPY` line and the rule: the image doesn't have it, so the build
 would fail there, and wheelgap doesn't read it from disk. That holds for a file a folder `COPY` (`COPY . .`) would
-have brought, and for one a `COPY` names itself, which Docker then doesn't find. A pattern wheelgap can't read exactly as Docker does is an error naming the
-ignore file's line: one Docker rejects, a `\` escape before a letter or digit, any `\` on Windows (where Docker reads
-it as a path separator), or an empty `<Dockerfile name>.dockerignore` next to a `.dockerignore` with rules (which of
-the two Docker then uses depends on the Dockerfile frontend).
+have brought, and for one a `COPY` names itself, which Docker then doesn't find. When the ignore file has rules, a
+requirements file that is a symlink, or is reached through a symlinked folder, isn't read either: the rules may leave
+out what the link points to, and the link then dangles in the image. A pattern wheelgap can't read exactly as Docker
+does is an error naming the ignore file's line: one Docker rejects, a `\` escape before a letter or digit, any `\` on
+Windows (where Docker reads it as a path separator), an exception that climbs out of its own path
+(`!../../requirements.txt`, which Docker reads as a rule that excludes), or an empty `<Dockerfile name>.dockerignore`
+next to a `.dockerignore` with rules (which of the two Docker then uses depends on the Dockerfile frontend).
 
 ### `--dockerfile-context` {#dockerfile-context}
 
