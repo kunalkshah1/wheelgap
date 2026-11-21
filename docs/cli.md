@@ -73,7 +73,9 @@ installs with `RUN pip install -r FILE`, on the image's Python and platform, so 
 compiling anything?" is one command (add `--deps` for what they pull in). `FILE` is followed back through `WORKDIR` and
 `COPY` to a file in the build context, taken to be the Dockerfile's folder unless
 [`--dockerfile-context DIR`](#dockerfile-context) names another, and each one gets a note on stderr
-(`Dockerfile:4: RUN pip install -r reads requirements.txt`). `[tool.wheelgap]` and `.python-version` are read from
+(`Dockerfile:4: RUN pip install -r reads requirements.txt`). After 0.13.0 the report says it too: in the header
+(`requirements.txt (Dockerfile:4)`), in `--json`'s [`dockerfile_inputs`](output.md#json) and in each
+`--github-annotations` message. `[tool.wheelgap]` and `.python-version` are read from
 that folder too. Only a strict subset is read:
 
 - a final stage built `FROM` an image, not an earlier stage;

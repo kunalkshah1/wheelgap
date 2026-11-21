@@ -1000,6 +1000,7 @@ def report_json(
     issues_urls: dict[int, str | None] | None = None,
     gap_wheels: list[gapwheels.Fill] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
+    dockerfile_inputs: list[dict[str, str | int]] | None = None,
 ) -> str:
     multi_py = len({t.python for t in targets}) > 1
     gaps = [r for r in rows if not r.ok]
@@ -1109,6 +1110,8 @@ def report_json(
         report["blocking_newer_python"] = blocking.names
     if gap_wheels is not None:  # --fix: one entry per gap cell a wheel on the gap wheel index fills
         report["gap_wheels"] = gapwheels.to_json(gap_wheels, multi_py)
+    if dockerfile_inputs is not None:
+        report["dockerfile_inputs"] = dockerfile_inputs
     return json.dumps(report, indent=2)
 
 
@@ -1301,7 +1304,7 @@ def render_markdown(
     dropped: dict[str, str] | None = None,
     issues_urls: dict[int, str | None] | None = None,
     pi_wheels: dict[int, piwheels.Hint] | None = None,
-    fix_hint: bool = False,
+    fix_hint: str | None = None,
 ) -> list[str]:
     """The same report as the text output, as GitHub-flavoured Markdown (for a job summary or a PR comment)."""
     plain = Style(False)
@@ -1398,7 +1401,7 @@ def render_markdown(
             if sug_lines:
                 out += [*sug_lines, ""]
     if fix_hint:
-        out += [FIX_HINT, ""]
+        out += [fix_hint, ""]
     return out
 
 
@@ -2459,6 +2462,11 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                     file=sys.stderr,
                 )
     source_labels = [s.label for s in sources]
+    install_sites = {path: f"{args.dockerfile}:{line}" for line, path in installs}
+    display_labels = [
+        f"{source.label} ({install_sites[source.path]})" if source.path in install_sites else source.label
+        for source in sources
+    ]
     row_notes: RowNotes = {}
     row_builds: RowBuilds = {}
     # Opt-in, since it sends package names to wheelgap.github.io: --explain on a lockfile makes no requests by default.
@@ -2590,14 +2598,18 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         if args.fix
         else None
     )
-    fix_hint = (
-        not args.fix
-        and not args.json
-        and not quiet
-        and not offline
-        and origin.other_index(index_url) is None
-        and bool(gap_wheel_candidates(gaps, targets, sources, index_url)[1])
-    )
+    # The hint never makes a request: it reads only the list a --fix run left in the cache (kept for
+    # cache.GAP_WHEELS_MAX_AGE), and only when a gap could use it. No hint when that list fills nothing; that is
+    # silence, not "nothing fits": --fix itself fetches the list again before it says so (gap_wheel_fills).
+    fix_hint = None
+    if not (args.fix or args.json or quiet or offline) and origin.other_index(index_url) is None:
+        _, hint_rows, source_of, private = gap_wheel_candidates(gaps, targets, sources, index_url)
+        if hint_rows:
+            wheels = gapwheels.look_up_cached()[0] if cached["read_cache"] else None
+            if wheels is None:
+                fix_hint = FIX_HINT
+            elif count := len(gapwheels.fillable(hint_rows, targets, source_of, wheels, private, index_url)):
+                fix_hint = f"Run with --fix: wheelgap's gap wheel index has a wheel for {count} of these gaps."
 
     if args.print_gap_wheel_snippet:  # one input of gapwheels.SNIPPET_KINDS, checked when it was read
         multi_py = len({t.python for t in targets}) > 1
@@ -2652,7 +2664,16 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     if args.github_annotations:
         # Workflow commands work on stdout and stderr alike; stderr keeps --json and --markdown output clean.
         # These are wheelgap's own (escaped in github.workflow_command), so they go past the logsafe guard.
-        for command in github_annotations(rows, targets, sources, failing, advisory, fills):
+        installed_by = (
+            {
+                package_id: install_sites[source.path]
+                for package_id, source in source_of.items()
+                if source.path is not None and source.path in install_sites
+            }
+            if install_sites
+            else None
+        )
+        for command in github_annotations(rows, targets, sources, failing, advisory, fills, installed_by=installed_by):
             write_command(command, sys.stderr if args.json or args.markdown else sys.stdout)
 
     if args.json:
@@ -2675,6 +2696,14 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                 issues_urls=issues_urls,
                 gap_wheels=fills,
                 pi_wheels=pi_wheels,
+                # As the Dockerfile's COPY names it: relative to the build context, with /, whatever the OS, the
+                # working directory or the way the context was given.
+                dockerfile_inputs=[
+                    {"dockerfile": args.dockerfile, "line": line, "file": path.relative_to(context_dir).as_posix()}
+                    for line, path in installs
+                ]
+                if args.dockerfile_inputs
+                else None,
             )
         )
         return code
@@ -2687,7 +2716,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
                     *render_markdown(
                         rows,
                         targets,
-                        source_labels,
+                        display_labels,
                         skipped,
                         ignored,
                         args,
@@ -2743,7 +2772,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
 
     pys = ", ".join(dict.fromkeys(t.python for t in targets))
     n_pkgs = f"{total_pkgs} package{'s' * (total_pkgs != 1)}"
-    print(style.dim(f"wheelgap {__version__} · {' + '.join(source_labels)} · {n_pkgs} · Python {pys}"))
+    print(style.dim(f"wheelgap {__version__} · {' + '.join(display_labels)} · {n_pkgs} · Python {pys}"))
     print()
 
     shown = rows if args.all else gaps
@@ -2824,7 +2853,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     if not args.explain:
         print(style.dim("Run with --explain to see which wheels were rejected and why."))
     if fix_hint:
-        print(style.dim(FIX_HINT))
+        print(style.dim(fix_hint))
     if source_allowed and not args.exit_zero:
         print(style.dim("Source builds are allowed (--fail-on missing), so this run passes."))
     for ln in fix_lines:  # a gap wheel fills only a gap, so the runs that return early above have none
