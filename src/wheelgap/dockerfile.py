@@ -14,7 +14,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
 
-from .sources import _COMMENT_RE, SourceError, _abbreviated_include, _join_continued_lines, _line_include
+from .sources import (
+    _COMMENT_RE,
+    SourceError,
+    _abbreviated_include,
+    _join_continued_lines,
+    _line_include,
+    parse_requirements,
+)
 from .targets import ALPINE_MUSL, DEBIAN_GLIBC
 
 # Debian release an official python X.Y tag that names none (python:3.13, python:3.13-slim) is built on, per Python.
@@ -1157,8 +1164,9 @@ def _check_includes(
     checked: set[tuple[Path, str]] = set()
 
     def no_symlink(file: Path) -> None:
-        # A symlinked file's includes are beside the link in the image and may be read from beside its target here,
-        # and a symlinked folder in a copied folder stays a link in the image: neither is followed.
+        # A symlinked folder in a copied folder stays a link in the image, where it may point somewhere else: it isn't
+        # followed. A symlinked file isn't either: stricter than pip needs now that the reader takes a link's
+        # includes from the link's folder (#618), but nothing is read through a link that way.
         if (link := _symlink_below(file, context)) is not None:
             raise DockerfileError(
                 f"line {number}: {link} is a symlink, which --dockerfile-inputs doesn't read "
@@ -1207,8 +1215,27 @@ def _system_command(args: str) -> bool:
     return True
 
 
-def _pip_install_files(number: int, args: str) -> list[str]:
-    """The FILEs of a RUN that is exactly `pip install -r FILE...` (or `python -m pip ...`)."""
+# `pip install` flags that don't change which files pip picks: read and ignored. Spelled out in full only, since pip
+# also takes any unambiguous prefix of a long option and wheelgap doesn't guess at those.
+_PIP_HARMLESS_FLAGS = (
+    "--no-cache-dir",
+    "--upgrade",
+    "-U",
+    "--disable-pip-version-check",
+    "--no-input",
+    "-q",
+    "--quiet",
+)
+_PIP_ROOT_USER_ACTIONS = ("warn", "ignore")  # pip's choices for --root-user-action; it exits on any other value
+_PIP_FLAGS_READ = (
+    "-r FILE, -c FILE, --no-cache-dir, --upgrade (-U), --disable-pip-version-check, --root-user-action, --no-input, "
+    "--quiet (-q) and, with pinned requirements, --prefer-binary"
+)
+
+
+def _pip_install_files(number: int, args: str) -> tuple[list[str], list[str], bool]:
+    """(the -r FILEs, the -c FILEs, whether --prefer-binary is given) of a RUN that is exactly
+    `pip install -r FILE...` (or `python -m pip ...`) with flags that don't change what pip picks."""
     unread = (
         "only `RUN pip install -r FILE` and system package commands (apt-get, apk, dnf...) are read by "
         "--dockerfile-inputs, and this RUN may change what pip installs"
@@ -1229,20 +1256,32 @@ def _pip_install_files(number: int, args: str) -> list[str]:
     if rest[:1] != ["install"]:
         raise DockerfileError(f"line {number}: {unread}")
     files: list[str] = []
+    constraints: list[str] = []
+    prefer_binary = False
     i = 1
     while i < len(rest):
         if rest[i] in ("-r", "--requirement") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
             files.append(rest[i + 1])
             i += 2
-        elif rest[i] == "--no-cache-dir":
+        elif rest[i] in ("-c", "--constraint") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+            constraints.append(rest[i + 1])
+            i += 2
+        elif rest[i] in _PIP_HARMLESS_FLAGS:
+            i += 1
+        elif rest[i].startswith("--root-user-action=") and rest[i].partition("=")[2] in _PIP_ROOT_USER_ACTIONS:
+            i += 1
+        elif rest[i] == "--root-user-action" and rest[i + 1 : i + 2] and rest[i + 1] in _PIP_ROOT_USER_ACTIONS:
+            i += 2
+        elif rest[i] == "--prefer-binary":
+            prefer_binary = True
             i += 1
         else:
             raise DockerfileError(
-                f"line {number}: pip install {rest[i]}: --dockerfile-inputs only reads -r FILE and --no-cache-dir"
+                f"line {number}: pip install {rest[i]}: --dockerfile-inputs only reads {_PIP_FLAGS_READ}"
             )
     if not files:
         raise DockerfileError(f"line {number}: {unread}")
-    return files
+    return files, constraints, prefer_binary
 
 
 def dockerfile_requirements(
@@ -1251,18 +1290,23 @@ def dockerfile_requirements(
     context: Path | None = None,
     *,
     includes: dict[tuple[int, Path], tuple[Path, ...]] | None = None,
+    constraints: dict[Path, tuple[Path, ...]] | None = None,
+    dependencies: bool = False,
 ) -> list[tuple[int, Path]]:
     """(line, requirements file) for each `RUN pip install -r FILE` in the Dockerfile's final stage.
 
     FILE is followed back through the WORKDIR and COPY instructions before it to a file in the build context, taken
     to be the Dockerfile's folder (or `context` if given). Only a strict subset is read: a final stage built FROM an
     image (not an earlier stage), WORKDIR with a literal path, plain `COPY SRC... DEST` from the build context, and
-    RUN lines that are exactly `pip install -r FILE` (or `python -m pip install`, with --no-cache-dir) or only system
-    package commands (_SYSTEM_COMMANDS). Anything else that may change what pip installs or put FILE in the image
-    (any other RUN, ADD, COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip config file, a
-    .dockerignore, a `# syntax=` frontend other than docker/dockerfile) is a DockerfileError naming its line, never
-    a guess. A -r or -c inside FILE is followed only when a COPY puts that same file where pip looks for it in the
-    image (_check_includes); `includes`, if given, is filled with the files each (line, FILE) includes.
+    RUN lines that are exactly `pip install -r FILE` (or `python -m pip install`, with `-c FILE` and the flags in
+    _PIP_FLAGS_READ) or only system package commands (_SYSTEM_COMMANDS). `constraints`, if given, is filled with each
+    requirements file's `-c` files, to pass to load_inputs; `dependencies` says the check will follow dependencies
+    (--deps), which --prefer-binary then can't be read for. Anything else that may change what pip installs or put
+    FILE in the image (any other RUN, ADD, COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip
+    config file, a .dockerignore, a `# syntax=` frontend other than docker/dockerfile) is a DockerfileError naming
+    its line, never a guess. A -r or -c inside a `-r FILE` or a `-c FILE` is followed only when a COPY puts that same
+    file where pip looks for it in the image (_check_includes); `includes`, if given, is filled with the files each
+    (line, FILE) includes, for the requirements files and the constraints files alike.
     """
     try:
         text = path.read_bytes().decode("utf-8-sig")
@@ -1280,6 +1324,8 @@ def dockerfile_requirements(
             dockerfile_dir=path.parent,
             context_label=context_label,
             includes=includes,
+            constraints=constraints,
+            dependencies=dependencies,
         )
     except DockerfileError as e:
         number, _, message = str(e).removeprefix("line ").partition(": ")
@@ -1296,6 +1342,8 @@ def _dockerfile_requirements(
     dockerfile_dir: Path | None = None,
     context_label: str = "the Dockerfile's folder",
     includes: dict[tuple[int, Path], tuple[Path, ...]] | None = None,
+    constraints: dict[Path, tuple[Path, ...]] | None = None,
+    dependencies: bool = False,
 ) -> list[tuple[int, Path]]:
     df_dir = dockerfile_dir if dockerfile_dir is not None else context
     for ignore in (context / ".dockerignore", df_dir / f"{name}.dockerignore"):
@@ -1338,6 +1386,27 @@ def _dockerfile_requirements(
     dirs = {"/"}
     copies: list[_Copy] = []
     found: dict[Path, int] = {}
+    used_constraints: dict[Path, tuple[Path, ...]] = {}
+
+    def copied_requirements(file: str, option: str) -> Path:
+        """The file in the build context that `-r FILE` or `-c FILE` on the RUN at `number` reads in the image."""
+        if file.startswith("/"):
+            target = posixpath.normpath(file)
+        elif workdir is None:
+            raise DockerfileError(
+                workdir_error
+                or f"line {number}: {option} {file} is relative, but no WORKDIR with an absolute path comes before it"
+            )
+        else:
+            target = posixpath.normpath(posixpath.join(workdir, file))
+        host = _find_copied_file(copies, target, context, number)
+        # A constraints file's includes are verified as a requirements file's are: a -r inside it is read as
+        # requirements (pip's rule), so those packages are installed, and a -c inside it constrains them all.
+        nested = _check_includes(host, target, copies, context, number)
+        if includes is not None:
+            includes[number, host] = nested
+        return host
+
     for number, instruction in instructions[start + 1 :]:
         parts = re.split(r"[ \t\v\f\r]+", instruction, maxsplit=1)
         keyword, args = parts[0].upper(), (parts[1].strip() if len(parts) > 1 else "")
@@ -1361,27 +1430,45 @@ def _dockerfile_requirements(
         elif keyword in ("ENV", "ARG") and re.search(r"(?<![A-Za-z0-9_])(?:PIP|UV)_", args):
             run_error = f"line {number}: an {keyword} setting PIP_ or UV_ variables changes what pip installs"
         elif keyword == "RUN" and not _system_command(args):
-            files = _pip_install_files(number, args)
+            files, constraint_files, prefer_binary = _pip_install_files(number, args)
             if run_error:
                 raise DockerfileError(run_error)
+            constraint_paths = tuple(copied_requirements(file, "-c") for file in constraint_files)
+            if constraint_paths and constraints is None:  # never read the requirements without their constraints
+                raise DockerfileError(f"line {number}: pip install -c FILE isn't read here")
             for file in files:
-                if file.startswith("/"):
-                    target = posixpath.normpath(file)
-                elif workdir is None:
+                host = copied_requirements(file, "-r")
+                # Read as load_inputs will read it: with the line's -c files, and through every include, so a
+                # requirement in an included file (or in a -r inside a constraints file) counts, and a requirement
+                # that only a constraint pins with == counts as pinned.
+                unpinned = (
+                    [p for p in parse_requirements(host, constraint_paths).packages if not p.version]
+                    if prefer_binary and not dependencies
+                    else []
+                )
+                if prefer_binary and (dependencies or unpinned):
+                    where = host.name
+                    if unpinned and unpinned[0].origin != host.name:
+                        where = f"{unpinned[0].origin} (read with {host.name})"
+                    # With it pip takes an older release that has a wheel over a newer one that has none, and
+                    # wheelgap checks the newest release a requirement allows: only a pin gives both the same one.
                     raise DockerfileError(
-                        workdir_error
-                        or f"line {number}: -r {file} is relative, but no WORKDIR with an absolute path comes before it"
+                        f"line {number}: pip install --prefer-binary makes pip pick an older release that has a "
+                        f"wheel, so it's only read when every requirement in {where} is pinned with == "
+                        "and --deps isn't used"
                     )
-                else:
-                    target = posixpath.normpath(posixpath.join(workdir, file))
-                host = _find_copied_file(copies, target, context, number)
-                nested = _check_includes(host, target, copies, context, number)
-                if includes is not None:
-                    includes[number, host] = nested
+                if host in found and used_constraints[host] != constraint_paths:
+                    raise DockerfileError(
+                        f"line {number}: {host.name} is installed again with other -c files than on line "
+                        f"{found[host]}, which --dockerfile-inputs doesn't read"
+                    )
+                used_constraints[host] = constraint_paths
                 found.setdefault(host, number)
             # An unread COPY or ADD before the one that copies FILE may still put a pip config file in the image.
             if unread := next((copy for copy in copies if copy.error), None):
                 raise DockerfileError(f"line {unread.line}: {unread.error}")
     if not found:
         raise DockerfileError(f"the final stage (line {final_line}) has no `RUN pip install -r FILE`")
+    if constraints is not None:
+        constraints.update(used_constraints)
     return [(number, host) for host, number in found.items()]

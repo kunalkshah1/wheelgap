@@ -7,7 +7,7 @@ import os
 import re
 import shlex
 import tomllib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from fnmatch import fnmatchcase
@@ -2040,21 +2040,41 @@ def _constraint_error(entries: list[Package]) -> str | None:
     return None
 
 
-def parse_requirements(path: Path) -> Source:
+def parse_requirements(path: Path, constraint_paths: tuple[Path, ...] = ()) -> Source:
+    """`constraint_paths` are constraints files given beside the file (`pip install -r FILE -c CONSTRAINTS`): pip
+    reads them before FILE, so they count as a `-c CONSTRAINTS` line at the top of it would."""
     constraints: list[Package] = []
     seen: dict[bool, set[Path]] = {False: set(), True: set()}  # requirement files, constraint files
     index_options: list[str] = []
     format_control = _FormatControl()
     req_lines: list[str] = []
     compiler_signs: list[str] = []
-    pkgs = _read_requirements(
-        path,
-        seen,
-        constraints,
-        index_options=index_options,
-        format_control=format_control,
-        req_lines=req_lines,
-        compiler_signs=compiler_signs,
+    pkgs: list[Package] = []
+    for constraint_path in constraint_paths:
+        # What it returns is the requirements of a -r inside the constraints file (pip's rule): keep them, as
+        # _read_requirements does for a -c line.
+        pkgs.extend(
+            _read_requirements(
+                constraint_path,
+                seen,
+                constraints,
+                constraint=True,
+                index_options=index_options,
+                format_control=format_control,
+                req_lines=req_lines,
+                compiler_signs=compiler_signs,
+            )
+        )
+    pkgs.extend(
+        _read_requirements(
+            path,
+            seen,
+            constraints,
+            index_options=index_options,
+            format_control=format_control,
+            req_lines=req_lines,
+            compiler_signs=compiler_signs,
+        )
     )
     return _finalize_requirements(path, pkgs, constraints, index_options, format_control, req_lines, compiler_signs)
 
@@ -2130,7 +2150,8 @@ def _finalize_requirements(
 def _cycle_error(path: Path, line: str, target_path: Path, stack: list[Path]) -> SourceError:
     # Names in the chain are relative to the folder the run started in, so two files with the same
     # name in different folders stay distinguishable (a file outside that folder is ../name). Forward slashes
-    # on every platform, as the include lines themselves are written.
+    # on every platform, as the include lines themselves are written. The chain names files as they were
+    # written, so a cycle through a link names the link, as pip names it.
     base = stack[0].parent
 
     def show(p: Path) -> str:
@@ -2161,12 +2182,22 @@ def _read_requirements(
     --extra-index-url, --find-links, --no-index), includes that aren't read, and abbreviated include options.
     `req_lines` collects requirement lines that aren't constraints, for --deps; `compiler_signs` notes the
     `--hash` options and `# via` comments that mark pip-compile output, in requirement files only.
-    `stack` is the chain of files being read, `-r` and `-c` together, as pip keeps it."""
-    path = path.resolve()
+    `stack` is the chain of files being read, `-r` and `-c` together, as pip keeps it: by the path each
+    file was named with.
+
+    A file is read through the folder it was named in (`os.path.abspath`, no symlink resolution), as pip
+    reads it, so an include in a symlinked file resolves against the link's folder, not the target's.
+    An include is a cycle when that named path is already in `stack`, which is pip's rule: one shared
+    file linked into two folders may be on the chain under both names, since its includes are other files
+    each time. The "already read" identity is the resolved path instead: a file reached by two names
+    lists its own lines once (pip would list them twice), but its includes are followed again, from the
+    folder of the new name."""
+    path = Path(os.path.abspath(path))
+    resolved = path.resolve()
     if stack is None:
         stack = []
-    already_seen = path in seen[constraint]
-    seen[constraint].add(path)
+    already_seen = resolved in seen[constraint]
+    seen[constraint].add(resolved)
     stack.append(path)
     pkgs: list[Package] = []
     try:
@@ -2206,7 +2237,9 @@ def _read_requirements(
                 # A URL (-c https://releases.openstack.org/...) or ${VAR} is left to pip: it's skipped, as before.
                 # Unread, it may name an index, so the input isn't PyPI-only.
                 if "://" not in target and "${" not in target:
-                    target_path = (path.parent / target).resolve()
+                    # The include is read from the including file's folder as named, and that named
+                    # path is what the cycle check compares, as pip does.
+                    target_path = Path(os.path.abspath(path.parent / target))
                     if target_path in stack:
                         # An include naming a file already being read is an error, as pip refuses it:
                         # the chain is one chain for -r and -c together, so a loop through a
@@ -2232,7 +2265,7 @@ def _read_requirements(
                     index_options.append(line)
                 continue
             if include:  # -r file, -rfile, --requirement file, --requirement=file, after other options too
-                target_path = (path.parent / include[1]).resolve()
+                target_path = Path(os.path.abspath(path.parent / include[1]))
                 if target_path in stack:
                     raise _cycle_error(path, line, target_path, stack)
                 pkgs.extend(
@@ -2944,10 +2977,18 @@ PARSERS = {
 }
 
 
-def load_file(path: Path, environment: str | None = None) -> Source:
-    """Read one input file. `environment` picks a pixi.lock environment (default: `default`)."""
+def load_file(path: Path, environment: str | None = None, constraint_paths: tuple[Path, ...] = ()) -> Source:
+    """Read one input file. `environment` picks a pixi.lock environment (default: `default`). `constraint_paths` are
+    the constraints files given beside a requirements file (see parse_requirements)."""
     kind = file_kind(path)
-    source = parse_pixi_lock(path, environment) if kind == "pixi" else READERS[kind](path)
+    if constraint_paths and kind != "requirements":
+        raise SourceError(f"{path.name}: constraints files (pip install -c) only apply to a requirements file")
+    if kind == "pixi":
+        source = parse_pixi_lock(path, environment)
+    elif constraint_paths:
+        source = parse_requirements(path, constraint_paths)
+    else:
+        source = READERS[kind](path)
     source.path, source.kind = path, kind
     _check_field_types(path, source)
     return source
@@ -3085,9 +3126,16 @@ def parse_dist(path: Path) -> Source:
     return Source(path.name, [pkg])
 
 
-def load_inputs(inputs: list[str], environment: str | None = None) -> list[Source]:
+def load_inputs(
+    inputs: list[str],
+    environment: str | None = None,
+    *,
+    requirements_constraints: Mapping[Path, tuple[Path, ...]] | None = None,
+) -> list[Source]:
     """Each input is a file, a directory (lockfile auto-detected) or a requirement like 'numpy==2.3.4'.
-    `environment` picks the pixi.lock environment; with no pixi.lock input it's an error."""
+    `environment` picks the pixi.lock environment; with no pixi.lock input it's an error.
+    `requirements_constraints` maps a requirements file among the inputs to the constraints files given beside it
+    (--dockerfile-inputs: `pip install -r FILE -c CONSTRAINTS`)."""
     if environment == "":
         raise SourceError("--environment needs a name")
     sources: list[Source] = []
@@ -3099,7 +3147,8 @@ def load_inputs(inputs: list[str], environment: str | None = None) -> list[Sourc
             if sources[-1].kind != "pixi" and (p / "pixi.lock").is_file():
                 sources[-1].passed_over = p / "pixi.lock"
         elif p.is_file():
-            sources.append(load_file(p, environment))
+            constraints = requirements_constraints.get(p, ()) if requirements_constraints is not None else ()
+            sources.append(load_file(p, environment, constraints))
         elif "/" in item or item.endswith((".lock", ".txt", ".toml", ".json", ".in", ".yml", ".yaml")):
             raise SourceError(f"{item}: no such file")
         else:

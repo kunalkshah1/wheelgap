@@ -1916,11 +1916,17 @@ def _main(argv: list[str], project: Path | None = None) -> int:
     else:
         config_inputs = args.inputs
     docker_includes: dict[tuple[int, Path], tuple[Path, ...]] = {}
+    docker_constraints: dict[Path, tuple[Path, ...]] = {}
     try:
         if args.dockerfile_inputs:
             context = Path(args.dockerfile_context) if args.dockerfile_context else None
             installs = dockerfile_requirements(
-                Path(args.dockerfile), build_args, context=context, includes=docker_includes
+                Path(args.dockerfile),
+                build_args,
+                context=context,
+                includes=docker_includes,
+                constraints=docker_constraints,
+                dependencies=args.deps,
             )
             args.inputs = [str(requirements) for _, requirements in installs]
         if args.clear_cache:
@@ -1951,8 +1957,15 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             image = read_dockerfile(Path(args.dockerfile), build_args)
             if not quiet:
                 for install_line, requirements in installs:
-                    nested = docker_includes[install_line, requirements]
-                    files = ", ".join(str(file) for file in (requirements, *nested))
+                    # Every file read: the requirements file and what it includes, then each -c file of the line
+                    # and what that includes (a -r in a constraints file is requirements, a -c more constraints).
+                    files = ", ".join(
+                        str(file) for file in (requirements, *docker_includes[install_line, requirements])
+                    )
+                    for constraint in docker_constraints.get(requirements, ()):
+                        files += f", -c {constraint}"
+                        if nested := docker_includes[install_line, constraint]:
+                            files += f" (which includes {', '.join(str(file) for file in nested)})"
                     print(
                         f"wheelgap: note: {args.dockerfile}:{install_line}: RUN pip install -r reads {files}",
                         file=sys.stderr,
@@ -2051,7 +2064,9 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             sources = [log_source(failures)]
         else:
             sources = (
-                [parse_dist(Path(args.dist))] if args.dist else load_inputs(args.inputs or ["."], args.environment)
+                [parse_dist(Path(args.dist))]
+                if args.dist
+                else load_inputs(args.inputs or ["."], args.environment, requirements_constraints=docker_constraints)
             )
         if args.print_gap_wheel_snippet and (
             len(sources) != 1
