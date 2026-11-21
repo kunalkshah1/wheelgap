@@ -1185,11 +1185,55 @@ def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_
         '--pre --"requirement"=base.txt\n',
     ):
         (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
-        with pytest.raises(DockerfileError, match=":4: requirements.txt has a nested -r or -c"):
+        with pytest.raises(
+            DockerfileError, match=":4: (?:/app/base.txt isn't copied|requirements.txt has an unreadable)"
+        ):
             dockerfile_requirements(path)
     (tmp_path / ".dockerignore").write_text("*.txt\n", encoding="utf-8")
     with pytest.raises(DockerfileError, match=r"\.dockerignore may leave files out of the build context"):
         dockerfile_requirements(path)
+
+
+@pytest.mark.parametrize(
+    ("copies", "contents", "error"),
+    [
+        ("COPY requirements.txt ./", "-r base.txt", "base.txt isn't copied"),
+        ("COPY requirements.txt ./\nCOPY base.txt /elsewhere/", "-r base.txt", "base.txt isn't copied"),
+        ("COPY . ./\nCOPY other.txt /app/base.txt", "-r base.txt", "COPY puts .*other.txt there"),
+        ("COPY . ./", "-r https://example.com/base.txt", "non-local include"),
+        ("COPY . ./", "-c ${CONSTRAINTS}", "non-local include"),
+        ("COPY . ./", "-e ./project -r base.txt", "unreadable -r or -c"),
+    ],
+)
+def test_dockerfile_requirements_refuses_unverifiable_includes(tmp_path, copies, contents, error):
+    path = _context(tmp_path, f"FROM python:3.13\nWORKDIR /app\n{copies}\nRUN pip install -r requirements.txt\n")
+    (tmp_path / "requirements.txt").write_text(contents, encoding="utf-8")
+    (tmp_path / "base.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("nowheels==0.9\n", encoding="utf-8")
+    run_line = 4 + copies.count("\n")
+    with pytest.raises(DockerfileError, match=rf":{run_line}: .*{error}"):
+        dockerfile_requirements(path)
+
+
+def test_cli_dockerfile_inputs_follows_nested_requirements_and_constraints(tmp_path, capsys, fake_pypi):
+    path = _context(
+        tmp_path,
+        "FROM python:3.13\nWORKDIR /app\nCOPY requirements.txt base.txt prod.txt constraints.txt ./\n"
+        "RUN pip install -r requirements.txt\n",
+    )
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("-r base.txt\n-c constraints.txt\n", encoding="utf-8")
+    (tmp_path / "base.txt").write_text("-r prod.txt\n", encoding="utf-8")
+    (tmp_path / "prod.txt").write_text("purewheel\n", encoding="utf-8")
+    (tmp_path / "constraints.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+    assert main([str(requirements), "-p", "3.13", "-t", "linux-x86_64", "--json"]) == 0
+    regular = json.loads(capsys.readouterr().out)
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    result = capsys.readouterr()
+    assert json.loads(result.out)["packages"] == regular["packages"]
+    assert f"{path}:4: RUN pip install -r reads " in result.err
+    for name in ("requirements.txt", "base.txt", "prod.txt", "constraints.txt"):
+        assert str(tmp_path / name) in result.err
 
 
 def test_cli_dockerfile_inputs_checks_what_the_image_installs(tmp_path, capsys, fake_pypi):

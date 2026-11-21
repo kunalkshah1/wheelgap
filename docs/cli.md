@@ -88,7 +88,7 @@ holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount
 `COPY --from`, globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a COPY that puts a file named
 `pip.conf` or `pip.ini` anywhere in the image, a `.dockerignore`, a `# syntax=` frontend other than
 `docker/dockerfile` (one pinned by digest, `docker/dockerfile:1@sha256:…`, is read when the Dockerfile has no
-heredoc), or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile` reads only the image.
+heredoc). Local nested `-r` and `-c` includes are read when COPY puts the same file at the path pip reads in the image. Without this flag, `--dockerfile` reads only the image.
 
 ### `--dockerfile-context` {#dockerfile-context}
 

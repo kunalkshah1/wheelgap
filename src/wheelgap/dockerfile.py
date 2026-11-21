@@ -7,13 +7,14 @@ import math
 import os
 import posixpath
 import re
+import shlex
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
 
-from .sources import _COMMENT_RE, _abbreviated_include, _join_continued_lines
+from .sources import _COMMENT_RE, _abbreviated_include, _join_continued_lines, _line_include
 from .targets import ALPINE_MUSL, DEBIAN_GLIBC
 
 # Debian release an official python X.Y tag that names none (python:3.13, python:3.13-slim) is built on, per Python.
@@ -1075,23 +1076,76 @@ def _copies_pip_config(copy: _Copy) -> bool:
     return (copy.dest + "/").startswith(_PIP_CONFIG)
 
 
-def _has_include(text: str) -> bool:
-    """Whether a requirements file has a -r or -c anywhere pip reads one: on a line of options, after other options
-    (`--pre -r base.txt`), over a continuation, or abbreviated (`--req base.txt`)."""
-    for raw in _join_continued_lines(text):
+def _requirement_includes(host: Path, number: int) -> list[str]:
+    includes = []
+    for raw in _join_continued_lines(host.read_text(encoding="utf-8-sig")):
         line = _COMMENT_RE.split(raw, 1)[0].strip()
-        if line.startswith("#"):
+        if not line.startswith("-"):
             continue
-        for token in line.split():
-            token = re.sub(r"[\"'\\]", "", token)  # pip shlex-splits options: `"-r"` and `\-r` are -r too
-            option = token.split("=", 1)[0]
-            if (
-                (token.startswith(("-r", "-c")) and not token.startswith("--"))
-                or option in ("--requirement", "--constraint")
-                or _abbreviated_include(token)
-            ):
-                return True
-    return False
+        try:
+            tokens = shlex.split(line)
+            include = _line_include(tokens, host.name)
+        except ValueError as e:
+            raise DockerfileError(f"line {number}: {host.name}: {e}") from None
+        if any(_abbreviated_include(token) for token in tokens) or (
+            include is None and any(token.startswith(("-r", "-c", "--requirement", "--constraint")) for token in tokens)
+        ):
+            raise DockerfileError(f"line {number}: {host.name} has an unreadable -r or -c: {line}")
+        if include is None:
+            continue
+        name = include[1]
+        if any(text in name for text in (":", "${", "\\")) or name.startswith("/"):
+            raise DockerfileError(f"line {number}: {host.name} has a non-local include: {name}")
+        if any(token.startswith(("-r=", "-c=")) for token in tokens):
+            raise DockerfileError(f"line {number}: {host.name} has an unreadable -r or -c: {line}")
+        includes.append(name)
+    return includes
+
+
+def _find_copied_file(copies: list[_Copy], target: str, context: Path, number: int) -> Path:
+    for copy in reversed(copies):
+        if copy.error:
+            raise DockerfileError(f"line {copy.line}: {copy.error}")
+        if (host := _copied_file(copy, target, context)) is not None:
+            relative = host.relative_to(context)
+            if any((context / parent).is_symlink() for parent in (relative, *relative.parents)):
+                raise DockerfileError(
+                    f"line {copy.line}: {relative} is a symlink, which --dockerfile-inputs doesn't read"
+                )
+            return host
+    raise DockerfileError(f"line {number}: {target} isn't copied from the build context by a COPY before this line")
+
+
+def _check_includes(
+    host: Path,
+    target: str,
+    copies: list[_Copy],
+    context: Path,
+    number: int,
+) -> tuple[Path, ...]:
+    found: dict[Path, None] = {}
+    active: set[Path] = set()
+    checked: set[tuple[Path, str]] = set()
+
+    def visit(current: Path, image: str) -> None:
+        if (current, image) in checked:
+            return
+        active.add(current)
+        for include in _requirement_includes(current, number):
+            image_path = posixpath.normpath(posixpath.join(posixpath.dirname(image), include))
+            copied = _find_copied_file(copies, image_path, context, number)
+            expected = Path(os.path.abspath(current.parent / include))
+            if Path(os.path.abspath(copied)) != expected or (current.parent / include).resolve() != copied.resolve():
+                raise DockerfileError(f"line {number}: {current.name} includes {include}, but COPY puts {copied} there")
+            if copied in active:
+                raise DockerfileError(f"line {number}: requirements include cycle through {include}")
+            found[copied] = None
+            visit(copied, image_path)
+        active.remove(current)
+        checked.add((current, image))
+
+    visit(host, target)
+    return tuple(found)
 
 
 def _system_command(args: str) -> bool:
@@ -1153,6 +1207,8 @@ def dockerfile_requirements(
     path: Path,
     build_args: Mapping[str, str] | None = None,
     context: Path | None = None,
+    *,
+    includes: dict[tuple[int, Path], tuple[Path, ...]] | None = None,
 ) -> list[tuple[int, Path]]:
     """(line, requirements file) for each `RUN pip install -r FILE` in the Dockerfile's final stage.
 
@@ -1162,8 +1218,8 @@ def dockerfile_requirements(
     RUN lines that are exactly `pip install -r FILE` (or `python -m pip install`, with --no-cache-dir) or only system
     package commands (_SYSTEM_COMMANDS). Anything else that may change what pip installs or put FILE in the image
     (any other RUN, ADD, COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip config file, a
-    .dockerignore, a `# syntax=` frontend other than docker/dockerfile, a nested -r or -c) is a DockerfileError
-    naming its line, never a guess.
+    .dockerignore, a `# syntax=` frontend other than docker/dockerfile, or an include that does not match the
+    build context) is a DockerfileError naming its line.
     """
     try:
         text = path.read_bytes().decode("utf-8-sig")
@@ -1174,7 +1230,13 @@ def dockerfile_requirements(
     context_label = str(context) if context is not None else "the Dockerfile's folder"
     try:
         return _dockerfile_requirements(
-            text, context_dir, path.name, build_args, dockerfile_dir=path.parent, context_label=context_label
+            text,
+            context_dir,
+            path.name,
+            build_args,
+            dockerfile_dir=path.parent,
+            context_label=context_label,
+            includes=includes,
         )
     except DockerfileError as e:
         number, _, message = str(e).removeprefix("line ").partition(": ")
@@ -1190,6 +1252,7 @@ def _dockerfile_requirements(
     build_args: Mapping[str, str] | None,
     dockerfile_dir: Path | None = None,
     context_label: str = "the Dockerfile's folder",
+    includes: dict[tuple[int, Path], tuple[Path, ...]] | None = None,
 ) -> list[tuple[int, Path]]:
     df_dir = dockerfile_dir if dockerfile_dir is not None else context
     for ignore in (context / ".dockerignore", df_dir / f"{name}.dockerignore"):
@@ -1268,20 +1331,10 @@ def _dockerfile_requirements(
                     )
                 else:
                     target = posixpath.normpath(posixpath.join(workdir, file))
-                host = None
-                for copy in reversed(copies):
-                    if copy.error:
-                        raise DockerfileError(f"line {copy.line}: {copy.error}")
-                    if (host := _copied_file(copy, target, context)) is not None:
-                        break
-                if host is None:
-                    raise DockerfileError(
-                        f"line {number}: {target} isn't copied from the build context by a COPY before this line"
-                    )
-                if _has_include(host.read_text(encoding="utf-8-sig", errors="replace")):
-                    raise DockerfileError(
-                        f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
-                    )
+                host = _find_copied_file(copies, target, context, number)
+                nested = _check_includes(host, target, copies, context, number)
+                if includes is not None:
+                    includes[number, host] = nested
                 found.setdefault(host, number)
             # An unread COPY or ADD before the one that copies FILE may still put a pip config file in the image.
             if unread := next((copy for copy in copies if copy.error), None):
