@@ -331,11 +331,11 @@ flags replace the configured list rather than adding to it.
 ### Worked example
 
 Run from a clone of this repository, on its `tests/fixtures/uvproj` test
-project, which needs no network access. The commands pin wheelgap 0.8.0 so the
-output below stays reproducible.
+project. The lockfile already lists the files wheelgap checks. Run the commands
+with `uv run` to use wheelgap from your checkout.
 
 ```bash
-uvx wheelgap@0.8.0 tests/fixtures/uvproj/uv.lock -p 3.13 -t linux-x86_64,linux-aarch64 --json > wheelgap.json
+uv run wheelgap tests/fixtures/uvproj/uv.lock -p 3.13 -t linux-x86_64,linux-aarch64 --json > wheelgap.json
 echo $?
 ```
 
@@ -362,16 +362,17 @@ puresdist linux-aarch64 source
 Ask why `fastlib` has no ARM wheel (this exits `1` too):
 
 ```bash
-uvx wheelgap@0.8.0 tests/fixtures/uvproj/uv.lock -p 3.13 -t linux-aarch64 --explain
+uv run wheelgap tests/fixtures/uvproj/uv.lock -p 3.13 -t linux-aarch64 --explain
 ```
 
+<!-- sample: uvproj -p 3.13 -t linux-aarch64 --explain -->
 ```text
-wheelgap 0.8.0 · uv.lock · 5 packages · Python 3.13
+wheelgap 0.13.0 · uv.lock · 5 packages · Python 3.13
 
-package    version  linux-aarch64
-fastlib    2.0.0    ● source
-nativeext  0.3      ● source
-puresdist  1.0      ● source
+package                  version  linux-aarch64
+fastlib                  2.0.0    ● source
+nativeext (via fastlib)  0.3      ● source
+puresdist                1.0      ● source
 
 2 packages with wheels for every target hidden (--all to show)
 
@@ -391,12 +392,13 @@ puresdist 1.0 on linux-aarch64: ● source
 
 skipped 2 non-index packages: demo (editable), gitdep (git)
 3 of 5 packages have gaps: 3 will build from source.
+Run with --fix to see whether wheelgap's gap wheel index has a wheel for these.
 ```
 
 Source builds are acceptable here, so check that nothing fails to install:
 
 ```bash
-uvx wheelgap@0.8.0 tests/fixtures/uvproj/uv.lock -p 3.13 -t linux-x86_64,linux-aarch64 --fail-on missing -q
+uv run wheelgap tests/fixtures/uvproj/uv.lock -p 3.13 -t linux-x86_64,linux-aarch64 --fail-on missing -q
 echo $?
 ```
 
