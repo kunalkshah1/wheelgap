@@ -24,8 +24,9 @@ each still checks its own wheel tags. Missing or invalid `Requires-Python` metad
 Exact pins (`name==1.2.3`) skip files whose `Requires-Python` excludes the selected Python, as pip does, and resolve
 per Python the same way. Bare package names keep their existing behavior. This applies to both the PyPI JSON API and
 `--index-url` simple indexes. A `uv.lock` is the exception: it's answered the way `uv sync` installs it, and uv
-ignores `Requires-Python` upper bounds, so with `--online` a file left out only by a `<` or `<=` bound still counts,
-and the report says pip would refuse it (see [uv.lock](inputs.md#uvlock)).
+checks only the lower bound of `Requires-Python`, so with `--online` a file that pip leaves out for a `<` or `<=`
+bound, or for `==3.14.*`, `~=3.14.0` or `!=3.15.*` on Python 3.15, still counts, and the report says pip would refuse
+it (see [uv.lock](inputs.md#uvlock)).
 
 Distinct resolutions appear as separate rows in text, Markdown and JSON, each with its selected version and only
 that Python's eligible files. Targets using another resolution show `–` (`n/a` in JSON). Identical resolutions share
