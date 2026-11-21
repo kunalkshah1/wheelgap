@@ -52,14 +52,15 @@ Each cell is one of:
 | `–` | `n/a` | not installed on this target (environment markers exclude it, or it selects another resolution) |
 | `✓ bundled` | `bundled` | no wheel on PyPI, but Pyodide ships its own build (with `--pyodide-lock`) |
 
-The last line, `Run with --fix to see whether ...`, is printed without [`--fix`](cli.md#fix) when a gap could use a
-gap wheel; printing it never makes a request. After 0.13.0 it has a second form: when an earlier `--fix` run left the
-gap wheel list in the [cache](how-it-works.md#cache) (kept for an hour), the line is
-`Run with --fix: wheelgap's gap wheel index has a wheel for N of these.`, where N counts the gap cells of the table
+After 0.13.0, a run without [`--fix`](cli.md#fix) ends with a line about it when a gap could use a gap wheel; printing
+it never makes a request. With no gap wheel list in the [cache](how-it-works.md#cache), or with `--no-cache` or
+`--online` (which don't read the cache), it is
+`Run with --fix to see whether wheelgap's gap wheel index has a wheel for these.` When an earlier `--fix` run left the
+list in the cache (kept for an hour), it is
+`Run with --fix: wheelgap's gap wheel index has a wheel for N of these gaps.`, where N counts the gap cells of the table
 that the cached list fills, and when that list fills none of them there is no line. No line isn't a statement that
-nothing fits: a wheel published since the list was cached isn't in it, and `--fix` itself reads the list again before
-it says so. With no cached list, or with `--no-cache` or `--online` (which don't read the cache), the line is the
-first form. `--offline`, `--index-url` and a `WHEELGAP_INDEX_URL` mirror print neither.
+nothing fits: a wheel published since the list was cached isn't in it, and `--fix` itself reads the list again before it
+says so. `--offline`, `--index-url` and a `WHEELGAP_INDEX_URL` mirror print neither.
 
 Packages that are fine everywhere are hidden; `--all` shows them. A range that picks a different release for
 different `-p` versions is one row per release, and the summary still counts the package once. With several targets, the summary also counts the

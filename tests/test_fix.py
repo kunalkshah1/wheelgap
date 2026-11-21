@@ -249,7 +249,7 @@ def test_fix_hint_in_text_and_markdown_never_reads_the_list(capsys, fake_pypi, g
     assert gap_wheels.calls == 0
 
 
-COUNTED_HINT = "Run with --fix: wheelgap's gap wheel index has a wheel for 1 of these."
+COUNTED_HINT = "Run with --fix: wheelgap's gap wheel index has a wheel for 1 of these gaps."
 
 
 def fix_hint_lines(out: str) -> list[str]:
@@ -293,7 +293,7 @@ def test_fix_hint_uses_only_the_cached_list(
 def test_fix_hint_counts_the_cells_the_cached_list_fills(capsys, fake_pypi, gap_wheels):
     cache_gap_wheel_list(gap_wheels, FT_WHEEL, "nowheels-0.9-cp314-cp314t-win_amd64.whl")
     _, out, _ = run(capsys, "nowheels==0.9", "-p", "3.14t", "-t", "win-arm64,win-amd64,linux-x86_64")
-    assert fix_hint_lines(out) == ["Run with --fix: wheelgap's gap wheel index has a wheel for 2 of these."]
+    assert fix_hint_lines(out) == ["Run with --fix: wheelgap's gap wheel index has a wheel for 2 of these gaps."]
     assert gap_wheels.calls == 0
 
 

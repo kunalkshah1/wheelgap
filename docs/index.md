@@ -28,7 +28,8 @@ Run with --explain to see which wheels were rejected and why.
 Run with --fix to see whether wheelgap's gap wheel index has a wheel for these.
 ```
 
-(That's the test project in `tests/fixtures/uvproj`, which needs no network.)
+(That's the test project in `tests/fixtures/uvproj`, which needs no network. The last line, `Run with --fix …`, is
+**after 0.13.0**.)
 
 ![wheelgap demo](demo.gif)
 

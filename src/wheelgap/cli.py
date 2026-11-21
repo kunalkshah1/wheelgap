@@ -2592,7 +2592,7 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             if wheels is None:
                 fix_hint = FIX_HINT
             elif count := len(gapwheels.fillable(hint_rows, targets, source_of, wheels, private, index_url)):
-                fix_hint = f"Run with --fix: wheelgap's gap wheel index has a wheel for {count} of these."
+                fix_hint = f"Run with --fix: wheelgap's gap wheel index has a wheel for {count} of these gaps."
 
     if args.print_gap_wheel_snippet:  # one input of gapwheels.SNIPPET_KINDS, checked when it was read
         multi_py = len({t.python for t in targets}) > 1
