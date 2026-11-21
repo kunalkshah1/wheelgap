@@ -1167,7 +1167,7 @@ def test_dockerfile_requirements_refuses(tmp_path, dockerfile, message):
         dockerfile_requirements(path)
 
 
-def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_path):
+def test_dockerfile_requirements_refuses_nested_includes(tmp_path):
     path = _context(tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\n")
     # pip strips a byte order mark and reads abbreviated options, so these include base.txt too.
     # pip also reads one after other options on a line, and over a continuation.
@@ -1187,8 +1187,45 @@ def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_
         (tmp_path / "requirements.txt").write_text(text, encoding="utf-8")
         with pytest.raises(DockerfileError, match=":4: requirements.txt has a nested -r or -c"):
             dockerfile_requirements(path)
-    (tmp_path / ".dockerignore").write_text("*.txt\n", encoding="utf-8")
-    with pytest.raises(DockerfileError, match=r"\.dockerignore may leave files out of the build context"):
+
+
+@pytest.mark.parametrize(
+    ("rules", "excluded_by"),
+    [
+        (".git\n__pycache__/\n", None),
+        ("deps\n!deps/requirements.txt\n", None),
+        ("*.txt\n", None),  # a lone * does not cross a path separator
+        ("**/requirement?.[t-v]xt\n", "**/requirement?.[t-v]xt"),
+        ("**/requirements*.txt\n", "**/requirements*.txt"),
+        ("/deps/\n", "/deps/"),
+        ("deps\n!deps/requirements.txt\n**/requirements.txt\n", "**/requirements.txt"),
+        ("**/requirements.txt\n!deps/requirements.txt\n", None),
+        ("deps\n!deps\ndeps/requirements.txt\n", "deps/requirements.txt"),
+        ("\ufeff# deps\r\n.\r\n", None),
+        ("  # deps\n", None),
+    ],
+)
+def test_dockerfile_requirements_dockerignore_matching(tmp_path, rules, excluded_by):
+    path = _context(tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r deps/requirements.txt\n")
+    requirements = tmp_path / "deps" / "requirements.txt"
+    requirements.parent.mkdir()
+    requirements.write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / ".dockerignore").write_bytes(rules.encode())
+    if excluded_by:
+        with pytest.raises(
+            DockerfileError, match=r":3: COPY .: deps/requirements.txt is excluded .* \.dockerignore"
+        ) as err:
+            dockerfile_requirements(path)
+        assert repr(excluded_by) in str(err.value)
+    else:
+        assert dockerfile_requirements(path) == [(4, requirements)]
+
+
+@pytest.mark.parametrize("pattern", [b"[unclosed", b"!", b"[z-a]", b"\xff"])
+def test_dockerfile_requirements_refuses_unreadable_dockerignore(tmp_path, pattern):
+    path = _context(tmp_path, "FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\n")
+    (tmp_path / ".dockerignore").write_bytes(b"# comment\n" + pattern + b"\n")
+    with pytest.raises(DockerfileError, match=r"\.dockerignore:2:"):
         dockerfile_requirements(path)
 
 
@@ -1322,7 +1359,7 @@ def test_cli_dockerfile_inputs_context_refuses_a_symlink_out_of_the_context(tmp_
     assert fake_pypi == []
 
 
-def test_cli_dockerfile_inputs_context_refuses_dockerignore(tmp_path, capsys, fake_pypi):
+def test_cli_dockerfile_inputs_uses_the_context_and_specific_ignore_file(tmp_path, capsys, fake_pypi):
     docker_dir = tmp_path / "docker"
     docker_dir.mkdir()
     df = docker_dir / "Dockerfile"
@@ -1342,12 +1379,20 @@ def test_cli_dockerfile_inputs_context_refuses_dockerignore(tmp_path, capsys, fa
 
     (tmp_path / ".dockerignore").write_text("*.txt\n", encoding="utf-8")
     assert main(argv) == 2
-    assert f"{df}: .dockerignore may leave files out of the build context" in capsys.readouterr().err
-    (tmp_path / ".dockerignore").unlink()
+    assert (
+        f"{df}:3: COPY requirements.txt: excluded from the build context by .dockerignore:1" in capsys.readouterr().err
+    )
+
+    (docker_dir / "Dockerfile.dockerignore").write_text("", encoding="utf-8")
+    assert main(argv) == 0  # the empty Dockerfile-specific file takes precedence
+    capsys.readouterr()
+    (tmp_path / ".dockerignore").write_text("*.json\n", encoding="utf-8")
 
     (docker_dir / "Dockerfile.dockerignore").write_text("*.txt\n", encoding="utf-8")
     assert main(argv) == 2
-    assert f"{df}: Dockerfile.dockerignore may leave files out of the build context" in capsys.readouterr().err
+    assert f"{df}:3: COPY requirements.txt: excluded from the build context by Dockerfile.dockerignore:1" in (
+        capsys.readouterr().err
+    )
 
 
 def test_cli_dockerfile_inputs_context_reads_config_from_the_context(tmp_path, capsys, fake_pypi):

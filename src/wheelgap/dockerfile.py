@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
 
+from . import dockerignore
 from .sources import _COMMENT_RE, _abbreviated_include, _join_continued_lines
 from .targets import ALPINE_MUSL, DEBIAN_GLIBC
 
@@ -998,6 +999,7 @@ def _read_copy(
     dirs: set[str],
     context: Path,
     context_label: str = "the Dockerfile's folder",
+    ignore_rules: tuple[dockerignore.Rule, ...] = (),
 ) -> _Copy:
     def unread(error: str) -> _Copy:
         return _Copy(number, (), "", False, error)
@@ -1022,7 +1024,10 @@ def _read_copy(
             return unread(f"COPY {name}: not found in the build context ({context_label})")
         if not host.resolve().is_relative_to(root):
             return unread(f"COPY {name}: a symlink out of the build context isn't read by --dockerfile-inputs")
-        sources.append((rel, host, host.is_dir()))
+        is_dir = host.is_dir()
+        if not is_dir and (rule := dockerignore.ignored(rel, ignore_rules)):
+            return unread(f"COPY {name}: excluded from the build context by {rule}")
+        sources.append((rel, host, is_dir))
     if dest.startswith("/"):
         target = posixpath.normpath(dest)
     elif workdir is None:
@@ -1035,7 +1040,7 @@ def _read_copy(
     return _Copy(number, tuple(sources), target, into)
 
 
-def _copied_file(copy: _Copy, target: str, context: Path) -> Path | None:
+def _copied_file(copy: _Copy, target: str, context: Path, ignore_rules: tuple[dockerignore.Rule, ...]) -> Path | None:
     """The file in the build context `copy` puts at `target` in the image, or None if it puts none there."""
     root = context.resolve()
     for rel, host, is_dir in reversed(copy.sources):  # a later source overwrites an earlier one
@@ -1057,6 +1062,11 @@ def _copied_file(copy: _Copy, target: str, context: Path) -> Path | None:
                     "which --dockerfile-inputs doesn't read"
                 )
             if found.is_file():
+                relative = found.relative_to(context).as_posix()
+                if rule := dockerignore.ignored(relative, ignore_rules):
+                    raise DockerfileError(
+                        f"line {copy.line}: COPY {rel}: {relative} is excluded from the build context by {rule}"
+                    )
                 return found
     return None
 
@@ -1162,7 +1172,7 @@ def dockerfile_requirements(
     RUN lines that are exactly `pip install -r FILE` (or `python -m pip install`, with --no-cache-dir) or only system
     package commands (_SYSTEM_COMMANDS). Anything else that may change what pip installs or put FILE in the image
     (any other RUN, ADD, COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip config file, a
-    .dockerignore, a `# syntax=` frontend other than docker/dockerfile, a nested -r or -c) is a DockerfileError
+    `# syntax=` frontend other than docker/dockerfile, a nested -r or -c) is a DockerfileError
     naming its line, never a guess.
     """
     try:
@@ -1192,11 +1202,10 @@ def _dockerfile_requirements(
     context_label: str = "the Dockerfile's folder",
 ) -> list[tuple[int, Path]]:
     df_dir = dockerfile_dir if dockerfile_dir is not None else context
-    for ignore in (context / ".dockerignore", df_dir / f"{name}.dockerignore"):
-        if ignore.exists():
-            raise DockerfileError(
-                f"{ignore.name} may leave files out of the build context: --dockerfile-inputs doesn't read it yet"
-            )
+    try:
+        ignore_rules = dockerignore.context_rules(context, df_dir / name)
+    except dockerignore.IgnoreError as e:
+        raise DockerfileError(str(e)) from None
     lines = [line.rstrip("\r") for line in text.split("\n")]
     if _escape_char(lines) != "\\":
         raise DockerfileError("--dockerfile-inputs only reads Dockerfiles with the default \\ escape")
@@ -1245,7 +1254,7 @@ def _dockerfile_requirements(
             if workdir is not None:
                 _add_dir(dirs, workdir)
         elif keyword == "COPY":
-            copies.append(copy := _read_copy(number, args, workdir, dirs, context, context_label))
+            copies.append(copy := _read_copy(number, args, workdir, dirs, context, context_label, ignore_rules))
             if _copies_pip_config(copy):
                 run_error = f"line {number}: a pip config file may change what pip installs"
         elif keyword == "ADD":
@@ -1272,7 +1281,7 @@ def _dockerfile_requirements(
                 for copy in reversed(copies):
                     if copy.error:
                         raise DockerfileError(f"line {copy.line}: {copy.error}")
-                    if (host := _copied_file(copy, target, context)) is not None:
+                    if (host := _copied_file(copy, target, context, ignore_rules)) is not None:
                         break
                 if host is None:
                     raise DockerfileError(

@@ -86,7 +86,7 @@ that folder too. Only a strict subset is read:
 Anything else in the final stage is an error naming its line, since it may change what pip installs or what `FILE`
 holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount`, a heredoc, `uv pip`), `ADD`,
 `COPY --from`, globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a COPY that puts a file named
-`pip.conf` or `pip.ini` anywhere in the image, a `.dockerignore`, a `# syntax=` frontend other than
+`pip.conf` or `pip.ini` anywhere in the image, a `# syntax=` frontend other than
 `docker/dockerfile` (one pinned by digest, `docker/dockerfile:1@sha256:…`, is read when the Dockerfile has no
 heredoc), or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile` reads only the image.
 
@@ -96,8 +96,9 @@ heredoc), or a nested `-r` or `-c` in `FILE`. Without this flag, `--dockerfile` 
 isn't built from its own folder. For `docker build -f docker/Dockerfile .`, run
 `wheelgap --dockerfile docker/Dockerfile --dockerfile-inputs --dockerfile-context .`. `COPY` sources are looked for in
 `DIR`, a path or symlink that leaves `DIR` is refused, and `[tool.wheelgap]` and `.python-version` are read from `DIR`.
-The ignore files are looked for where Docker reads them: `.dockerignore` at the root of `DIR`, and
-`<Dockerfile name>.dockerignore` beside the Dockerfile. A `DIR` that isn't a folder exits 2. This isn't
+Wheelgap uses `<Dockerfile name>.dockerignore` beside the Dockerfile when present, otherwise `.dockerignore`
+at the root of `DIR`. An ignored requirements file is an error on its `COPY` line. Invalid or unsupported
+ignore patterns are an error on the ignore file's line. A `DIR` that isn't a folder exits 2. This isn't
 `docker buildx build --build-context`, which adds named contexts.
 
 ### `--build-arg` {#build-arg}
