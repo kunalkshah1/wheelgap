@@ -585,14 +585,14 @@ def test_check_lockfile_dependencies_refuses_lockfiles_and_offline(tmp_path, fix
         call("check_lockfile", path=str(fixtures / "uvproj" / "uv.lock"), dependencies=True, python="3.13"),
     )
     assert lockfile["result"]["isError"] is True
-    assert "--deps" in lockfile["result"]["content"][0]["text"]
+    assert "the dependencies argument" in lockfile["result"]["content"][0]["text"]
     requirements = tmp_path / "requirements.txt"
     requirements.write_text("purewheel==3.1\n", encoding="utf-8")
     (_, offline) = run(
         init(), call("check_lockfile", path=str(requirements), dependencies=True, offline=True, python="3.13")
     )
     assert offline["result"]["isError"] is True
-    assert "--deps" in offline["result"]["content"][0]["text"]
+    assert "call without dependencies: true" in offline["result"]["content"][0]["text"]
 
 
 def test_check_lockfile_lists_skipped_packages(fake_pypi, fixtures):
@@ -647,13 +647,63 @@ def test_check_lockfile_uses_project_config_and_arguments_win(fake_pypi, fixture
     assert explicit["result"]["structuredContent"]["targets"] == ["3.13 linux-x86_64"]
 
 
-def test_check_lockfile_offline_config_means_no_lookups(fake_pypi, tmp_path):
-    (tmp_path / "requirements.txt").write_text("purewheel==3.1\n", encoding="utf-8")
+@pytest.mark.parametrize("dependencies", [False, True])
+def test_check_lockfile_offline_config_means_no_lookups(fake_pypi, tmp_path, dependencies):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("purewheel==3.1\n", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[tool.wheelgap]\noffline = true\n", encoding="utf-8")
-    (_, reply) = run(init(), call("check_lockfile", path=str(tmp_path / "requirements.txt"), python="3.13"))
+    (_, reply) = run(init(), call("check_lockfile", path=str(requirements), python="3.13", dependencies=dependencies))
     assert reply["result"]["isError"] is True
-    assert "offline" in reply["result"]["content"][0]["text"]
+    message = reply["result"]["content"][0]["text"]
+    assert "call again with offline: false" in message
+    if dependencies:
+        assert "call without dependencies: true" in message
+    assert not re.search(r"(^|\s)--[a-z]", message)
     assert not fake_pypi
+
+
+def test_check_lockfile_offline_false_overrides_config(fake_pypi, tmp_path):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[tool.wheelgap]\noffline = true\n", encoding="utf-8")
+    (_, reply) = run(init(), call("check_lockfile", path=str(requirements), python="3.13", offline=False))
+    assert reply["result"]["structuredContent"]["packages"] == 1
+    assert fake_pypi
+
+
+@pytest.mark.parametrize("inputs", [False, True])
+def test_check_dockerfile_offline_error_gives_project_setting(fake_pypi, tmp_path, inputs):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[tool.wheelgap]\noffline = true\n", encoding="utf-8")
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        "FROM python:3.13-slim\nCOPY requirements.txt /app/\nRUN pip install -r /app/requirements.txt\n",
+        encoding="utf-8",
+    )
+    args = {"inputs": True} if inputs else {"path": str(requirements)}
+    (_, reply) = run(init(), call("check_dockerfile", dockerfile=str(dockerfile), **args))
+    assert reply["result"]["isError"] is True
+    message = reply["result"]["content"][0]["text"]
+    assert "set offline = false in [tool.wheelgap]" in message
+    assert not re.search(r"(^|\s)--[a-z]", message)
+    assert not fake_pypi
+
+
+def test_check_lockfile_conflicting_selection_names_arguments(fixtures):
+    (_, reply) = run(
+        init(),
+        call(
+            "check_lockfile",
+            path=str(fixtures / "uvproj" / "uv.lock"),
+            only_groups=["dev"],
+            extras=["test"],
+        ),
+    )
+    assert reply["result"]["isError"] is True
+    message = reply["result"]["content"][0]["text"]
+    assert "only_groups cannot be combined with extras or all_extras" in message
+    assert not re.search(r"(^|\s)--[a-z]", message)
 
 
 def test_check_lockfile_ignores_from_config(fake_pypi, tmp_path, fixtures):
@@ -855,7 +905,7 @@ def test_check_dockerfile_reports_used_arg_defaults(
     assert all("-p/-t" not in note for note in data["notes"])
     for name, value in defaults.items():
         assert any(f"FROM uses the default of ARG {name}={value}" in note for note in data["notes"])
-    assert any("pass build_args if the build sets --build-arg" in note for note in data["notes"])
+    assert any("pass build_args if the build supplies a value" in note for note in data["notes"])
 
 
 def test_check_dockerfile_build_args_replace_the_defaults(fake_pypi, tmp_path, fixtures):
@@ -989,7 +1039,8 @@ def test_check_dockerfile_inputs_refused_line_is_a_tool_error_with_its_line(fake
     (_, reply) = run(init(), call("check_dockerfile", dockerfile=str(dockerfile), inputs=True))
     assert reply["result"]["isError"] is True
     text = reply["result"]["content"][0]["text"]
-    assert f"{dockerfile}:4: pip install .: the inputs argument only reads -r FILE" in text
+    assert f"{dockerfile}:4: pip install .: the inputs argument only reads requirements files" in text
+    assert not re.search(r"(^|\s)--[a-z]", text)
     assert "--dockerfile-inputs" not in text  # the CLI's flag isn't an argument here
     assert not fake_pypi
 
@@ -1070,7 +1121,7 @@ def test_check_lockfile_fix_says_when_no_gap_wheel_fits(fake_pypi, gap_wheels, t
     (_, reply) = run(init(), call("check_lockfile", path=nowheels_requirements(tmp_path), fix=True, **FT_WIN_ARM))
     data = reply["result"]["structuredContent"]
     assert data["gap_wheels"] == [] and gap_wheels.calls == 1
-    assert "--fix: no wheel on the gap wheel index fills these gaps" in data["notes"]
+    assert "the fix argument: no wheel on the gap wheel index fills these gaps" in data["notes"]
 
 
 def test_check_lockfile_quiet_config_keeps_notes(fake_pypi, gap_wheels, tmp_path, monkeypatch):
@@ -1085,7 +1136,7 @@ def test_check_lockfile_quiet_config_keeps_notes(fake_pypi, gap_wheels, tmp_path
     # The --fix note, with the gap wheel list from the fixture: no wheel fills the gap.
     quiet = check(fix=True, **FT_WIN_ARM)
     assert quiet["gap_wheels"] == []
-    assert "--fix: no wheel on the gap wheel index fills these gaps" in quiet["notes"]
+    assert "the fix argument: no wheel on the gap wheel index fills these gaps" in quiet["notes"]
     (tmp_path / "pyproject.toml").unlink()
     assert check(fix=True, **FT_WIN_ARM)["notes"] == quiet["notes"]
 
@@ -1104,7 +1155,7 @@ def test_check_lockfile_quiet_config_keeps_notes(fake_pypi, gap_wheels, tmp_path
     calls = gap_wheels.calls
     quiet = check(fix=True, **FT_WIN_ARM)
     assert quiet["gap_wheels"] == [] and gap_wheels.calls == calls
-    assert any(note.startswith("--fix is off with ") for note in quiet["notes"])
+    assert any(note.startswith("the fix argument is off with ") for note in quiet["notes"])
     (tmp_path / "pyproject.toml").unlink()
     assert check(fix=True, **FT_WIN_ARM)["notes"] == quiet["notes"]
 
@@ -1116,7 +1167,7 @@ def test_check_dockerfile_quiet_config_keeps_notes(fake_pypi, gap_wheels, tmp_pa
     (_, quiet_reply) = run(init(), call("check_dockerfile", fix=True, **arguments))
     quiet = quiet_reply["result"]["structuredContent"]
     assert quiet["gap_wheels"] == []
-    assert "--fix: no wheel on the gap wheel index fills these gaps" in quiet["notes"]
+    assert "the fix argument: no wheel on the gap wheel index fills these gaps" in quiet["notes"]
     (tmp_path / "pyproject.toml").unlink()
     (_, reply) = run(init(), call("check_dockerfile", fix=True, **arguments))
     assert reply["result"]["structuredContent"]["notes"] == quiet["notes"]
@@ -1129,7 +1180,8 @@ def test_check_lockfile_fix_is_off_with_another_index(fake_pypi, gap_wheels, tmp
     (_, reply) = run(init(), call("check_lockfile", path=nowheels_requirements(tmp_path), fix=True, **FT_WIN_ARM))
     data = reply["result"]["structuredContent"]
     assert data["gap_wheels"] == [] and gap_wheels.calls == 0
-    assert any(note.startswith("--fix is off with ") for note in data["notes"])
+    assert any(note.startswith("the fix argument is off with ") for note in data["notes"])
+    assert all(not re.search(r"(^|\s)--[a-z]", note) for note in data["notes"])
 
 
 @pytest.mark.usefixtures("index")

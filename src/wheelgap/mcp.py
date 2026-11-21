@@ -264,14 +264,12 @@ TOOLS: list[dict[str, Any]] = [
             "requirements.txt, or a project directory containing one), exactly as the wheelgap command line does, and "
             "report the packages without a wheel on some target. Environment markers, .python-version and the "
             "project's [tool.wheelgap] settings (targets, python, glibc, ignore, offline, index-url, ...) apply; "
-            "arguments given here override them, except that offline = true in the project can't be turned off. "
+            "arguments given here override them. "
             "A uv.lock, poetry.lock or pdm.lock is checked for every extra and dependency group unless [tool.wheelgap] "
             "extras or groups select some, so it may report gaps the deployment never installs: match the deployment "
             "with extras, all_extras, groups, only_groups and no_dev (--extra, --all-extras, --group, --only-group, "
             "--no-dev), e.g. no_dev: true for a production install. A pyproject.toml's PEP 735 groups are checked "
             "only when groups or only_groups name them. "
-            "Notes and errors name command-line flags (--offline is the offline argument here, --deps the "
-            "dependencies argument). "
             "Packages from git, paths, URLs or private indexes are listed under "
             "'skipped': they were NOT checked. 'notes' says when an answer may be incomplete. Requirements files are "
             "looked up on the index; with dependencies: true, requirements files, a conda environment.yml, "
@@ -311,7 +309,9 @@ TOOLS: list[dict[str, Any]] = [
                 | {"description": _PYODIDE_LOCK_PROP["description"] + " Default: [tool.wheelgap] pyodide-lock."},
                 "offline": {
                     "type": "boolean",
-                    "description": "Use only the files recorded in the lockfile; never contact the index.",
+                    "description": "True uses only files recorded in the lockfile and never contacts the index. "
+                    "False rechecks on the index and overrides offline = true for this call. "
+                    "Omit to use the project's default.",
                 },
                 "extras": {
                     "type": "array",
@@ -804,8 +804,8 @@ def _check_lockfile(args: dict[str, Any]) -> dict[str, Any]:
     argv += _version_flags(args)
     if lock_spec := _lock_spec(args):
         argv.append(f"--pyodide-lock={lock_spec}")
-    if offline:
-        argv.append("--offline")
+    if offline is not None:
+        argv.append("--offline" if offline else "--online")
     if dependencies:
         # The CLI writes a gap's 'via' only under --explain. Avoid --deps' automatic release suggestions and the
         # tracker's notes (they'd send the tree's names to wheelgap.github.io); the tool needs the paths only, and
@@ -813,7 +813,7 @@ def _check_lockfile(args: dict[str, Any]) -> dict[str, Any]:
         argv += ["--deps", "--explain", "--no-suggest", "--no-notes", "--no-build-info"]
     if fix:
         argv.append("--fix")
-    return _run_cli(argv, path)
+    return _run_cli(argv, path, supports_offline=True)
 
 
 def _check_dockerfile(args: dict[str, Any]) -> dict[str, Any]:
@@ -847,8 +847,7 @@ def _check_dockerfile(args: dict[str, Any]) -> dict[str, Any]:
     try:
         image = read_dockerfile(dockerfile, build_args)
     except DockerfileError as e:  # wheelgap's message; its CLI advice, where it gives some, translated
-        message = str(e).replace("pass -p/-t instead", "use check_lockfile with python and targets instead")
-        raise ToolError(message) from e
+        raise ToolError(_translate_cli_message(str(e))) from e
     except OSError as e:  # a Dockerfile that can't be read
         raise ToolError(f"{args['dockerfile']}: {e.strerror or e}") from e
     argv = ["--json", f"--dockerfile={dockerfile}"]
@@ -860,12 +859,8 @@ def _check_dockerfile(args: dict[str, Any]) -> dict[str, Any]:
         argv.append("--dockerfile-inputs")
         if context is not None:
             argv.append(f"--dockerfile-context={context}")
-        try:
-            # No input: the CLI takes the requirements files from the Dockerfile. 'path' is the build context.
-            out = _run_cli(argv, context if context is not None else dockerfile.parent, positional=False)
-        except ToolError as e:  # a line --dockerfile-inputs refuses, as PATH:LINE: why; its CLI words translated
-            message = str(e).replace("pass -p/-t instead", "use check_lockfile with python and targets instead")
-            raise ToolError(message.replace("--dockerfile-inputs", "the inputs argument")) from e
+        # No input: the CLI takes the requirements files from the Dockerfile. 'path' is the build context.
+        out = _run_cli(argv, context if context is not None else dockerfile.parent, positional=False)
     else:
         try:
             out = _run_cli(argv, path)
@@ -880,16 +875,6 @@ def _check_dockerfile(args: dict[str, Any]) -> dict[str, Any]:
         "musl": image.musl,
         "build_args": dict(image.build_args),
     }
-    # The CLI flags cannot be passed to check_dockerfile: give the corresponding MCP tool advice instead.
-    out["notes"] = [
-        note.replace(
-            "pass --build-arg if the build sets one",
-            "pass build_args if the build sets --build-arg",
-        )
-        if "FROM uses the default of ARG " in note
-        else note
-        for note in out["notes"]
-    ]
     return out
 
 
@@ -1032,7 +1017,50 @@ _EXPLAIN_ONLY = frozenset(
 )
 
 
-def _run_cli(argv: list[str], path: Path, *, positional: bool = True, project: Path | None = None) -> dict[str, Any]:
+_CLI_ADVICE = {
+    "pass --online for this run": "call again with offline: false",
+    "drop --offline": "call again with offline: false",
+    "drop --deps": "call without dependencies: true",
+    "add --deps": "call with dependencies: true",
+    "drop --fix": "call without fix: true",
+    "pass -p/-t instead": "use check_lockfile with python and targets instead",
+    "pass --build-arg if the build sets one": "pass build_args if the build supplies a value",
+    "--offline": "offline: true",
+    "--deps": "the dependencies argument",
+    "--fix": "the fix argument",
+    "--extra": "extras",
+    "--all-extras": "all_extras",
+    "--group": "groups",
+    "--only-group": "only_groups",
+    "--no-dev": "no_dev",
+    "--dockerfile-inputs": "the inputs argument",
+    "--dockerfile-context": "the context argument",
+    "--dist": "check_dist",
+    "--ignore": "ignore in [tool.wheelgap]",
+    "(--index-url, or index-url in [tool.wheelgap])": "(index-url in [tool.wheelgap])",
+    "-r FILE and --no-cache-dir": "requirements files and pip's no-cache-dir option",
+}
+_CLI_ADVICE_RE = re.compile(r"(?<![\w/-])(?:" + "|".join(map(re.escape, _CLI_ADVICE)) + r")(?![\w/-])")
+
+
+def _translate_cli_message(message: str, *, supports_offline: bool = False) -> str:
+    def replace(match: re.Match[str]) -> str:
+        advice = _CLI_ADVICE[match[0]]
+        if advice == "call again with offline: false" and not supports_offline:
+            return "set offline = false in [tool.wheelgap]"
+        return advice
+
+    return _CLI_ADVICE_RE.sub(replace, message)
+
+
+def _run_cli(
+    argv: list[str],
+    path: Path,
+    *,
+    positional: bool = True,
+    project: Path | None = None,
+    supports_offline: bool = False,
+) -> dict[str, Any]:
     """`wheelgap ARGV -- PATH` with --json in ARGV: its result as the lockfile tools return it. positional=False
     runs `wheelgap ARGV` with no input at all (check_dist: --dist takes none) and keeps PATH in the result; the
     settings then come from PROJECT, never the server's working directory (another project's)."""
@@ -1050,7 +1078,11 @@ def _run_cli(argv: list[str], path: Path, *, positional: bool = True, project: P
             code = cli.main(argv, project=project)
     except SystemExit as e:  # argparse rejected a value
         code = e.code if isinstance(e.code, int) else 2
-    messages = [line.removeprefix("wheelgap: ") for line in err.getvalue().splitlines() if line.strip()]
+    messages = [
+        _translate_cli_message(line.removeprefix("wheelgap: "), supports_offline=supports_offline)
+        for line in err.getvalue().splitlines()
+        if line.strip()
+    ]
     notes = [m.removeprefix("note: ") for m in messages if m.startswith("note: ")]
     # SystemExit is a BaseException: without the handler above it would end the server, not just this call.
     if code not in (0, 1):
