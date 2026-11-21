@@ -79,8 +79,11 @@ that folder too. Only a strict subset is read:
 - a final stage built `FROM` an image, not an earlier stage;
 - `WORKDIR` with a literal path;
 - plain `COPY SRC... DEST` from the build context (`--chown`, `--chmod` and `--link` are fine);
-- `RUN` lines that are exactly `pip install -r FILE` or `python -m pip install -r FILE` (`--no-cache-dir` is fine),
-  or only system package commands joined by `&&` (`apt-get`, `apt`, `apk`, `yum`, `dnf`, `microdnf`, adding users
+- `RUN` lines that are exactly `pip install -r FILE` or `python -m pip install -r FILE` , with `-c FILE` /
+  `--constraint FILE` and these flags: `--no-cache-dir`, `--upgrade` / `-U`, `--disable-pip-version-check`,
+  `--root-user-action VALUE` (including `=VALUE`), `--no-input`, and `-q` / `--quiet`.
+  `--prefer-binary` requires exact pins and a check without `--deps`. The mode also reads
+  system package commands joined by `&&` (`apt-get`, `apt`, `apk`, `yum`, `dnf`, `microdnf`, adding users
   and groups, `mkdir`, `chown`, `chmod`, and `rm` under `/var/lib/apt/lists/`, `/var/cache/` or `/root/.cache/`).
 
 Anything else in the final stage is an error naming its line, since it may change what pip installs or what `FILE`

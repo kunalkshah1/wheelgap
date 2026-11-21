@@ -1894,10 +1894,17 @@ def _main(argv: list[str], project: Path | None = None) -> int:
         config_inputs = [str(context_dir)]
     else:
         config_inputs = args.inputs
+    docker_constraints: dict[Path, tuple[Path, ...]] = {}
     try:
         if args.dockerfile_inputs:
             context = Path(args.dockerfile_context) if args.dockerfile_context else None
-            installs = dockerfile_requirements(Path(args.dockerfile), build_args, context=context)
+            installs = dockerfile_requirements(
+                Path(args.dockerfile),
+                build_args,
+                context=context,
+                constraints=docker_constraints,
+                dependencies=args.deps,
+            )
             args.inputs = [str(requirements) for _, requirements in installs]
         if args.clear_cache:
             folder, count = cache.clear()
@@ -2025,7 +2032,9 @@ def _main(argv: list[str], project: Path | None = None) -> int:
             sources = [log_source(failures)]
         else:
             sources = (
-                [parse_dist(Path(args.dist))] if args.dist else load_inputs(args.inputs or ["."], args.environment)
+                [parse_dist(Path(args.dist))]
+                if args.dist
+                else load_inputs(args.inputs or ["."], args.environment, requirements_constraints=docker_constraints)
             )
         if args.print_gap_wheel_snippet and (
             len(sources) != 1

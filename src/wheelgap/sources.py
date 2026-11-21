@@ -7,7 +7,7 @@ import os
 import re
 import shlex
 import tomllib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from fnmatch import fnmatchcase
@@ -2040,13 +2040,22 @@ def _constraint_error(entries: list[Package]) -> str | None:
     return None
 
 
-def parse_requirements(path: Path) -> Source:
+def parse_requirements(path: Path, constraint_paths: tuple[Path, ...] = ()) -> Source:
     constraints: list[Package] = []
     seen: dict[bool, set[Path]] = {False: set(), True: set()}  # requirement files, constraint files
     index_options: list[str] = []
     format_control = _FormatControl()
     req_lines: list[str] = []
     compiler_signs: list[str] = []
+    for constraint_path in constraint_paths:
+        _read_requirements(
+            constraint_path,
+            seen,
+            constraints,
+            constraint=True,
+            index_options=index_options,
+            format_control=format_control,
+        )
     pkgs = _read_requirements(
         path,
         seen,
@@ -3085,7 +3094,12 @@ def parse_dist(path: Path) -> Source:
     return Source(path.name, [pkg])
 
 
-def load_inputs(inputs: list[str], environment: str | None = None) -> list[Source]:
+def load_inputs(
+    inputs: list[str],
+    environment: str | None = None,
+    *,
+    requirements_constraints: Mapping[Path, tuple[Path, ...]] | None = None,
+) -> list[Source]:
     """Each input is a file, a directory (lockfile auto-detected) or a requirement like 'numpy==2.3.4'.
     `environment` picks the pixi.lock environment; with no pixi.lock input it's an error."""
     if environment == "":
@@ -3099,7 +3113,8 @@ def load_inputs(inputs: list[str], environment: str | None = None) -> list[Sourc
             if sources[-1].kind != "pixi" and (p / "pixi.lock").is_file():
                 sources[-1].passed_over = p / "pixi.lock"
         elif p.is_file():
-            sources.append(load_file(p, environment))
+            constraints = requirements_constraints.get(p) if requirements_constraints is not None else None
+            sources.append(parse_requirements(p, constraints) if constraints else load_file(p, environment))
         elif "/" in item or item.endswith((".lock", ".txt", ".toml", ".json", ".in", ".yml", ".yaml")):
             raise SourceError(f"{item}: no such file")
         else:

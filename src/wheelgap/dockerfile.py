@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
 
-from .sources import _COMMENT_RE, _abbreviated_include, _join_continued_lines
+from .sources import _COMMENT_RE, _abbreviated_include, _join_continued_lines, parse_requirements
 from .targets import ALPINE_MUSL, DEBIAN_GLIBC
 
 # Debian release an official python X.Y tag that names none (python:3.13, python:3.13-slim) is built on, per Python.
@@ -1111,7 +1111,7 @@ def _system_command(args: str) -> bool:
     return True
 
 
-def _pip_install_files(number: int, args: str) -> list[str]:
+def _pip_install_files(number: int, args: str) -> tuple[list[str], list[str], bool]:
     """The FILEs of a RUN that is exactly `pip install -r FILE...` (or `python -m pip ...`)."""
     unread = (
         "only `RUN pip install -r FILE` and system package commands (apt-get, apk, dnf...) are read by "
@@ -1132,35 +1132,59 @@ def _pip_install_files(number: int, args: str) -> list[str]:
         raise DockerfileError(f"line {number}: {unread}")
     if rest[:1] != ["install"]:
         raise DockerfileError(f"line {number}: {unread}")
+    harmless = {
+        "--no-cache-dir",
+        "--upgrade",
+        "-U",
+        "--disable-pip-version-check",
+        "--no-input",
+        "-q",
+        "--quiet",
+    }
     files: list[str] = []
+    constraints: list[str] = []
+    prefer_binary = False
     i = 1
     while i < len(rest):
         if rest[i] in ("-r", "--requirement") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
             files.append(rest[i + 1])
             i += 2
-        elif rest[i] == "--no-cache-dir":
+        elif rest[i] in ("-c", "--constraint") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+            constraints.append(rest[i + 1])
+            i += 2
+        elif rest[i] in harmless or rest[i].partition("=")[0] == "--root-user-action" and "=" in rest[i]:
+            i += 1
+        elif rest[i] == "--root-user-action" and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+            i += 2
+        elif rest[i] == "--prefer-binary":
+            prefer_binary = True
             i += 1
         else:
             raise DockerfileError(
-                f"line {number}: pip install {rest[i]}: --dockerfile-inputs only reads -r FILE and --no-cache-dir"
+                f"line {number}: pip install {rest[i]}: --dockerfile-inputs only reads -r FILE, -c FILE "
+                "and the documented install flags"
             )
     if not files:
         raise DockerfileError(f"line {number}: {unread}")
-    return files
+    return files, constraints, prefer_binary
 
 
 def dockerfile_requirements(
     path: Path,
     build_args: Mapping[str, str] | None = None,
     context: Path | None = None,
+    *,
+    constraints: dict[Path, tuple[Path, ...]] | None = None,
+    dependencies: bool = False,
 ) -> list[tuple[int, Path]]:
     """(line, requirements file) for each `RUN pip install -r FILE` in the Dockerfile's final stage.
 
     FILE is followed back through the WORKDIR and COPY instructions before it to a file in the build context, taken
     to be the Dockerfile's folder (or `context` if given). Only a strict subset is read: a final stage built FROM an
     image (not an earlier stage), WORKDIR with a literal path, plain `COPY SRC... DEST` from the build context, and
-    RUN lines that are exactly `pip install -r FILE` (or `python -m pip install`, with --no-cache-dir) or only system
-    package commands (_SYSTEM_COMMANDS). Anything else that may change what pip installs or put FILE in the image
+    RUN lines that are exactly `pip install -r FILE` (or `python -m pip install`, with the documented install flags) or
+    only system package commands (_SYSTEM_COMMANDS). Anything else that may change what pip installs or put FILE in
+    the image
     (any other RUN, ADD, COPY --from, SHELL, an ENV or ARG setting PIP_ or UV_ variables, a pip config file, a
     .dockerignore, a `# syntax=` frontend other than docker/dockerfile, a nested -r or -c) is a DockerfileError
     naming its line, never a guess.
@@ -1174,7 +1198,14 @@ def dockerfile_requirements(
     context_label = str(context) if context is not None else "the Dockerfile's folder"
     try:
         return _dockerfile_requirements(
-            text, context_dir, path.name, build_args, dockerfile_dir=path.parent, context_label=context_label
+            text,
+            context_dir,
+            path.name,
+            build_args,
+            dockerfile_dir=path.parent,
+            context_label=context_label,
+            constraints=constraints,
+            dependencies=dependencies,
         )
     except DockerfileError as e:
         number, _, message = str(e).removeprefix("line ").partition(": ")
@@ -1190,6 +1221,8 @@ def _dockerfile_requirements(
     build_args: Mapping[str, str] | None,
     dockerfile_dir: Path | None = None,
     context_label: str = "the Dockerfile's folder",
+    constraints: dict[Path, tuple[Path, ...]] | None = None,
+    dependencies: bool = False,
 ) -> list[tuple[int, Path]]:
     df_dir = dockerfile_dir if dockerfile_dir is not None else context
     for ignore in (context / ".dockerignore", df_dir / f"{name}.dockerignore"):
@@ -1232,6 +1265,36 @@ def _dockerfile_requirements(
     dirs = {"/"}
     copies: list[_Copy] = []
     found: dict[Path, int] = {}
+    used_constraints: dict[Path, tuple[Path, ...]] = {}
+
+    def copied_requirements(file: str, option: str) -> Path:
+        if file.startswith("/"):
+            target = posixpath.normpath(file)
+        elif workdir is None:
+            raise DockerfileError(
+                workdir_error
+                or f"line {number}: {option} {file} is relative, but no WORKDIR with an absolute path comes before it"
+            )
+        else:
+            target = posixpath.normpath(posixpath.join(workdir, file))
+        for copy in reversed(copies):
+            if copy.error:
+                raise DockerfileError(f"line {copy.line}: {copy.error}")
+            if (host := _copied_file(copy, target, context)) is not None:
+                break
+        else:
+            raise DockerfileError(
+                f"line {number}: {target} isn't copied from the build context by a COPY before this line"
+            )
+        relative = host.relative_to(context)
+        if any((context / part).is_symlink() for part in (relative, *relative.parents)):
+            raise DockerfileError(f"line {number}: {relative} is a symlink, which --dockerfile-inputs doesn't read")
+        if _has_include(host.read_text(encoding="utf-8-sig", errors="replace")):
+            raise DockerfileError(
+                f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
+            )
+        return host
+
     for number, instruction in instructions[start + 1 :]:
         parts = re.split(r"[ \t\v\f\r]+", instruction, maxsplit=1)
         keyword, args = parts[0].upper(), (parts[1].strip() if len(parts) > 1 else "")
@@ -1255,37 +1318,28 @@ def _dockerfile_requirements(
         elif keyword in ("ENV", "ARG") and re.search(r"(?<![A-Za-z0-9_])(?:PIP|UV)_", args):
             run_error = f"line {number}: an {keyword} setting PIP_ or UV_ variables changes what pip installs"
         elif keyword == "RUN" and not _system_command(args):
-            files = _pip_install_files(number, args)
+            files, constraint_files, prefer_binary = _pip_install_files(number, args)
             if run_error:
                 raise DockerfileError(run_error)
+
+            constraint_paths = tuple(copied_requirements(file, "-c") for file in constraint_files)
             for file in files:
-                if file.startswith("/"):
-                    target = posixpath.normpath(file)
-                elif workdir is None:
+                host = copied_requirements(file, "-r")
+                if prefer_binary and (
+                    dependencies or any(not package.version for package in parse_requirements(host).packages)
+                ):
                     raise DockerfileError(
-                        workdir_error
-                        or f"line {number}: -r {file} is relative, but no WORKDIR with an absolute path comes before it"
+                        f"line {number}: --prefer-binary can pick an older wheel and needs exact pins without --deps"
                     )
-                else:
-                    target = posixpath.normpath(posixpath.join(workdir, file))
-                host = None
-                for copy in reversed(copies):
-                    if copy.error:
-                        raise DockerfileError(f"line {copy.line}: {copy.error}")
-                    if (host := _copied_file(copy, target, context)) is not None:
-                        break
-                if host is None:
-                    raise DockerfileError(
-                        f"line {number}: {target} isn't copied from the build context by a COPY before this line"
-                    )
-                if _has_include(host.read_text(encoding="utf-8-sig", errors="replace")):
-                    raise DockerfileError(
-                        f"line {number}: {host.name} has a nested -r or -c, which --dockerfile-inputs doesn't read yet"
-                    )
+                if host in found and used_constraints[host] != constraint_paths:
+                    raise DockerfileError(f"line {number}: {host.name} is installed with different constraint files")
+                used_constraints[host] = constraint_paths
                 found.setdefault(host, number)
             # An unread COPY or ADD before the one that copies FILE may still put a pip config file in the image.
             if unread := next((copy for copy in copies if copy.error), None):
                 raise DockerfileError(f"line {unread.line}: {unread.error}")
     if not found:
         raise DockerfileError(f"the final stage (line {final_line}) has no `RUN pip install -r FILE`")
+    if constraints is not None:
+        constraints.update(used_constraints)
     return [(number, host) for host, number in found.items()]

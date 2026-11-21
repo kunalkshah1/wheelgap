@@ -1192,6 +1192,72 @@ def test_dockerfile_requirements_refuses_a_dockerignore_and_nested_includes(tmp_
         dockerfile_requirements(path)
 
 
+@pytest.mark.parametrize(
+    "flags",
+    [
+        "--upgrade",
+        "-U",
+        "--disable-pip-version-check",
+        "--root-user-action=ignore",
+        "--root-user-action warn",
+        "--no-input",
+        "-q",
+        "--quiet",
+        "--prefer-binary",
+        "-U -q --no-input --no-cache-dir --root-user-action=ignore",
+    ],
+)
+def test_dockerfile_requirements_pip_install_flags(tmp_path, flags):
+    path = _context(
+        tmp_path, f"FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install {flags} -r requirements.txt\n"
+    )
+    assert dockerfile_requirements(path) == [(4, tmp_path / "requirements.txt")]
+
+
+@pytest.mark.parametrize("setting", ["--no-deps", "--index-url https://example.org", "--prefer-binary"])
+def test_dockerfile_requirements_refuses_install_flags_that_can_change_resolution(tmp_path, setting):
+    path = _context(
+        tmp_path, f"FROM python:3.13\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt {setting}\n"
+    )
+    (tmp_path / "requirements.txt").write_text("purewheel>=3\n", encoding="utf-8")
+    with pytest.raises(DockerfileError, match=rf":4: .*{setting.split()[0]}"):
+        dockerfile_requirements(path)
+    assert read_dockerfile(path).python == "3.13"
+
+
+@pytest.mark.parametrize("location", ["missing", "symlink", "copied"])
+def test_dockerfile_install_constraint_file(tmp_path, location, capsys, fake_pypi):
+    copy = "COPY requirements.txt ./" if location == "missing" else "COPY requirements.txt constraints.txt ./"
+    path = _context(
+        tmp_path,
+        f"FROM python:3.13\nWORKDIR /app\n{copy}\nRUN pip install -r requirements.txt -c constraints.txt\n",
+    )
+    requirements = tmp_path / "requirements.txt"
+    constraints = tmp_path / "constraints.txt"
+    requirements.write_text("purewheel\n", encoding="utf-8")
+    if location == "symlink":
+        real = tmp_path / "real.txt"
+        real.write_text("purewheel==3.1\n", encoding="utf-8")
+        try:
+            constraints.symlink_to(real)
+        except OSError:
+            pytest.skip("creating symlinks needs privileges on Windows")
+        with pytest.raises(DockerfileError, match="constraints.txt is a symlink"):
+            dockerfile_requirements(path)
+        return
+    constraints.write_text("purewheel==3.1\n", encoding="utf-8")
+    if location == "missing":
+        with pytest.raises(DockerfileError, match="constraints.txt isn't copied"):
+            dockerfile_requirements(path)
+        return
+    assert main(["--dockerfile", str(path), "--dockerfile-inputs", "--json"]) == 0
+    actual = json.loads(capsys.readouterr().out)["packages"]
+    requirements.write_text("-c constraints.txt\npurewheel\n", encoding="utf-8")
+    assert main([str(requirements), "-p", "3.13", "-t", "linux-x86_64", "--json"]) == 0
+    assert actual == json.loads(capsys.readouterr().out)["packages"]
+    assert actual[0]["version"] == "3.1"
+
+
 def test_cli_dockerfile_inputs_checks_what_the_image_installs(tmp_path, capsys, fake_pypi):
     path = _context(
         tmp_path,
