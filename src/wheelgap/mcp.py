@@ -311,6 +311,7 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "description": "True uses only files recorded in the lockfile and never contacts the index. "
                     "False rechecks on the index and overrides offline = true for this call. "
+                    "False sends one index request per PyPI package. "
                     "Omit to use the project's default.",
                 },
                 "extras": {
@@ -1059,8 +1060,11 @@ _CLI_ADVICE_ELSEWHERE = {
     "add --deps": "use check_lockfile with dependencies: true",
     "--environment": "check_lockfile's environment argument",
 }
-# A backslash before a flag is a Windows path (C:\srv\--fix\uv.lock), as / is elsewhere.
-_CLI_ADVICE_RE = re.compile(r"(?<![\w/\\-])(?:" + "|".join(map(re.escape, _CLI_ADVICE)) + r")(?![\w/\\-])")
+# A backslash before a flag is a Windows path (C:\srv\--fix\uv.lock), as / is elsewhere. A flag right after
+# "pip install " is the Dockerfile's own word (pip has --group too), not wheelgap's.
+_CLI_ADVICE_RE = re.compile(
+    r"(?<![\w/\\-])(?<!pip install )(?:" + "|".join(map(re.escape, _CLI_ADVICE)) + r")(?![\w/\\-])"
+)
 
 
 def _translate_cli_message(message: str, *, lockfile: bool = False) -> str:
@@ -1068,6 +1072,9 @@ def _translate_cli_message(message: str, *, lockfile: bool = False) -> str:
     which has the arguments the others lack."""
 
     def replace(match: re.Match[str]) -> str:
+        # Inside `...` it is a command to run as written (`wheelgap PATH --group NAME`).
+        if message.count("`", 0, match.start()) % 2:
+            return match[0]
         if not lockfile and match[0] in _CLI_ADVICE_ELSEWHERE:
             return _CLI_ADVICE_ELSEWHERE[match[0]]
         return _CLI_ADVICE[match[0]]

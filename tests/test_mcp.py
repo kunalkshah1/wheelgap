@@ -815,6 +815,30 @@ def test_check_lockfile_offline_false_note_about_pip_names_no_flag(fake_pypi, tm
         # Not the command line's flags: a file's own options, a longer flag, and paths. They stay as they are.
         ("requirements.txt:2: --extra-index-url and --no-deps aren't read", True, None),
         ("Dockerfile:1: duplicate --platform flag", False, None),
+        # A flag the Dockerfile's own pip line has (pip has --group too) is the user's word; only wheelgap's is named.
+        (
+            "Dockerfile:4: pip install --group: --dockerfile-inputs only reads -r FILE, -c FILE, --no-cache-dir, "
+            "--upgrade (-U), --disable-pip-version-check, --root-user-action, --no-input, --quiet (-q) and, with "
+            "pinned requirements, --prefer-binary",
+            False,
+            "Dockerfile:4: pip install --group: the inputs argument only reads -r FILE, -c FILE, --no-cache-dir, "
+            "--upgrade (-U), --disable-pip-version-check, --root-user-action, --no-input, --quiet (-q) and, with "
+            "pinned requirements, --prefer-binary",
+        ),
+        (
+            "Dockerfile:4: uv pip install --group: --dockerfile-inputs only reads -r FILE",
+            False,
+            "Dockerfile:4: uv pip install --group: the inputs argument only reads -r FILE",
+        ),
+        # A command in backticks is one to run as written.
+        (
+            "no lockfile found in /srv/app (looked for uv.lock, pylock.toml, poetry.lock, pdm.lock, Pipfile.lock, "
+            "requirements.txt, requirements.lock, pixi.lock). To check a dependency group in its pyproject.toml, run "
+            "`wheelgap /srv/app/pyproject.toml --group NAME` (groups: dev). Pass a file, or package names like "
+            "`wheelgap numpy psycopg2`.",
+            True,
+            None,
+        ),
         ("/srv/--fix/uv.lock: no such file or directory", True, None),
         ("C:\\srv\\--deps\\uv.lock: invalid TOML", True, None),
     ],
