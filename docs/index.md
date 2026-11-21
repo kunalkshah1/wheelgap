@@ -10,13 +10,14 @@ all.
 uvx wheelgap uv.lock -p 3.13 -t linux-aarch64,musl-aarch64
 ```
 
+<!-- sample: uvproj -p 3.13 -t linux-aarch64,musl-aarch64 -->
 ```text
 wheelgap 0.13.0 · uv.lock · 5 packages · Python 3.13
 
-package    version  linux-aarch64  musl-aarch64
-fastlib    2.0.0    ● source       ● source
-nativeext  0.3      ● source       ● source
-puresdist  1.0      ● source       ● source
+package                  version  linux-aarch64  musl-aarch64
+fastlib                  2.0.0    ● source       ● source
+nativeext (via fastlib)  0.3      ● source       ● source
+puresdist                1.0      ● source       ● source
 
 2 packages with wheels for every target hidden (--all to show)
 skipped 2 non-index packages: demo (editable), gitdep (git)
@@ -24,6 +25,7 @@ linux-aarch64  3 from source
 musl-aarch64   3 from source
 3 of 5 packages have gaps: 3 will build from source.
 Run with --explain to see which wheels were rejected and why.
+Run with --fix to see whether wheelgap's gap wheel index has a wheel for these.
 ```
 
 (That's the test project in `tests/fixtures/uvproj`, which needs no network.)
