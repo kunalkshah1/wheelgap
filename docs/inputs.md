@@ -70,13 +70,15 @@ is walked per target from the project and workspace members (and the lock's depe
 only a Windows-only dependency pulls in isn't reported on Linux.
 
 **Answers follow `uv sync`**, with and without `--online` (0.13.0 followed pip with `--online`). uv
-[ignores `Requires-Python` upper bounds](https://docs.astral.sh/uv/reference/internals/resolver/#requires-python), so
+[checks only the lower bound of the `Requires-Python` range](https://docs.astral.sh/uv/reference/internals/resolver/#requires-python), so
 a pin whose release says `<3.15` still counts on Python 3.15, where pip would refuse it (when installing from a
 requirements file exported from the lock, for example). With `--online` (after 0.13.0), wheelgap says where the two
 differ: a note on stderr gives the number of such packages, `--explain` names them, and `--json` lists the files in
 each package's `pip_refuses`. Without `--online` it can't tell, because the lock doesn't record each file's
-`Requires-Python`. Only a plain `<` or `<=` bound is read this way: a file left out by `==3.14.*`, `~=` or `!=` stays
-left out with `--online`.
+`Requires-Python`. The same rule covers every kind of clause: on Python 3.15, uv also takes a file that says
+`==3.14.*`, `~=3.14.0` or `>=3.10,!=3.15.*`, since the lowest Python each allows (3.14, 3.14.0, 3.10) isn't above
+3.15. A file whose lowest allowed Python is above the target stays left out, as with pip: `>=3.16` or `==3.16.*` on
+3.15, `==3.14.*` on 3.13, and `>=3.15,!=3.15.*` on 3.15 (it starts at 3.16).
 
 **Skipped:** packages whose source is `editable`, `virtual`, `git`, `path`, `directory` or `url`. Packages from
 another index keep their locked files and are never looked up on PyPI.

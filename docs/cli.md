@@ -73,7 +73,9 @@ installs with `RUN pip install -r FILE`, on the image's Python and platform, so 
 compiling anything?" is one command (add `--deps` for what they pull in). `FILE` is followed back through `WORKDIR` and
 `COPY` to a file in the build context, taken to be the Dockerfile's folder unless
 [`--dockerfile-context DIR`](#dockerfile-context) names another, and each one gets a note on stderr
-(`Dockerfile:4: RUN pip install -r reads requirements.txt`). `[tool.wheelgap]` and `.python-version` are read from
+(`Dockerfile:4: RUN pip install -r reads requirements.txt`). After 0.13.0 the report says it too: in the header
+(`requirements.txt (Dockerfile:4)`), in `--json`'s [`dockerfile_inputs`](output.md#json) and in each
+`--github-annotations` message. `[tool.wheelgap]` and `.python-version` are read from
 that folder too. Only a strict subset is read:
 
 - a final stage built `FROM` an image, not an earlier stage;
@@ -82,19 +84,65 @@ that folder too. Only a strict subset is read:
 - `RUN` lines that are exactly `pip install -r FILE` or `python -m pip install -r FILE` (`--no-cache-dir` is fine),
   or only system package commands joined by `&&` (`apt-get`, `apt`, `apk`, `yum`, `dnf`, `microdnf`, adding users
   and groups, `mkdir`, `chown`, `chmod`, and `rm` under `/var/lib/apt/lists/`, `/var/cache/` or `/root/.cache/`);
-- **after 0.13.0**: `RUN uv pip install --system -r FILE` (`--no-cache` and `--no-cache-dir` are fine) for a `FILE`
-  named `*.txt` or `*.in`, and the `COPY --from=ghcr.io/astral-sh/uv[:TAG] /uv /uvx DEST/` that puts uv in the image
-  (`/uvx` is optional). `--system` is required, since without it uv installs into a virtual environment. The file is
-  checked as uv installs it: uv ignores an upper bound in a release's `Requires-Python` where pip refuses the
-  release, and the report says which packages that changes.
+- on that `pip install` line, **after 0.13.0**: flags that don't change which files pip picks (`--upgrade` / `-U`,
+  `--disable-pip-version-check`, `--root-user-action ignore` or `=ignore` (or `warn`), `--no-input`, `-q` /
+  `--quiet`);
+- `-c FILE` / `--constraint FILE` on that line, **after 0.13.0**: the constraints file is followed back through
+  `WORKDIR` and `COPY` like `-r FILE`, with the same refusals, and applied to the line's requirements files as a
+  `-c FILE` line at the top of each would be (the note on stderr names it too). A requirements file installed twice
+  with different `-c` files is an error;
+- `--prefer-binary` on that line, **after 0.13.0**, only when every requirement the line installs is pinned with
+  `==` (in `FILE`, in the files it includes, and in a `-r` inside a `-c` file; a requirement that a constraint pins
+  with `==` counts) and `--deps` isn't used: otherwise pip may take an older release that has a wheel over a newer
+  one that has none, while wheelgap checks the newest. Any other `pip install` flag (`--no-deps`, `--pre`, `--index-url`,
+  `--only-binary`, `--user`, `--target`, `-e`, combined short flags such as `-Uq`, `--requirement=FILE`) is still an
+  error.
 
 Anything else in the final stage is an error naming its line, since it may change what pip installs or what `FILE`
-holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount`, a heredoc, any other `uv` command
-or flag), `ADD`, any other `COPY --from`, globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a COPY
-that puts a file named `pip.conf` or `pip.ini` anywhere in the image, a COPY of a `uv.toml` or `pyproject.toml`
-before a uv install, a `.dockerignore`, a `# syntax=` frontend other than `docker/dockerfile` (one pinned by digest,
-`docker/dockerfile:1@sha256:…`, is read when the Dockerfile has no heredoc), or a nested `-r` or `-c` in `FILE`.
-Without this flag, `--dockerfile` reads only the image.
+holds: any other `RUN` (`&&` with other commands, redirects, variables, `--mount`, a heredoc), `ADD`, `COPY --from`
+(but for the one that brings uv, below), globs, `SHELL`, an `ENV` or `ARG` setting `PIP_` or `UV_` variables, a COPY
+that puts a file named `pip.conf` or `pip.ini` anywhere in the image, a `# syntax=` frontend other than
+`docker/dockerfile` (one pinned by digest, `docker/dockerfile:1@sha256:…`, is read when the Dockerfile has no
+heredoc). Without this flag, `--dockerfile` reads only the image.
+
+A `-r` or `-c` inside `FILE` (and inside the file it names, and so on) is an error in 0.13.0. **After 0.13.0** it is
+followed when the included file is in the image where pip looks for it, and the same holds inside a constraints file
+named with `-c FILE` on the `RUN` line, where a `-r` adds requirements (their packages are checked) and a `-c` adds
+constraints, as pip reads them. pip reads an include beside the including file *in the image*, so wheelgap finds the
+`COPY` that puts a file at that path and reads it only if it is the same file as the one beside the including file in
+the build context; the note on stderr then names every file read
+(`Dockerfile:4: RUN pip install -r reads requirements.txt, base.txt, -c constraints.txt (which includes pins.txt)`).
+An include that no `COPY` puts there (pip would stop the build), one where a `COPY` puts a different file, a URL, a
+`${VAR}`, an absolute path, an abbreviated option (`--req`), an include on a line with an editable, or a symlink
+anywhere in the chain is still an error naming the `RUN` line.
+
+`RUN uv pip install --system -r FILE` is read too (**after 0.13.0**; 0.13.0 refuses it), with the
+`COPY --from=ghcr.io/astral-sh/uv[:TAG] /uv /uvx DEST/` that puts uv in the image (`/uvx` is optional). `FILE` is
+found, and its includes are verified, as for pip. `--system` is required, since without it uv installs into a virtual
+environment; `-c FILE` (or `--constraints FILE`), `--no-cache`, `--no-cache-dir`, `--upgrade` / `-U` and `-q` /
+`--quiet` are read, and any other flag is an error, pip's own among them (`--no-input`, `--disable-pip-version-check`,
+`--root-user-action`, `--prefer-binary`). The answer follows uv, not pip: uv checks only the lower bound of a
+release's `Requires-Python`, so a pin that pip refuses for an upper bound is checked as uv installs it, and the report
+says which packages that changes (`pip_refuses` in `--json`). For a range the two can pick different versions, and
+wheelgap picks as pip does, so under uv every requirement must be pinned with `==` (in `FILE`, in a file it includes,
+or by a constraints file) and `--deps` can't be used: an unpinned requirement is an error naming the `RUN` line, the
+requirement and its file. These are errors as well: a file not named `*.txt` or `*.in` (uv reads other names as
+locks, scripts or projects), a `-r` inside a constraints file (pip installs what it names, uv only constrains with
+it), a `uv.toml` or `pyproject.toml` copied into the image before the uv line, a file that pip installs on one line
+and uv on another, and every other `uv` command (`uv sync`, `uv add`, `uv pip sync`).
+
+A `.dockerignore` is read as BuildKit reads it (**after 0.13.0**; 0.13.0 refuses any project that has one):
+`<Dockerfile name>.dockerignore` beside the Dockerfile if there is one, otherwise `.dockerignore` at the root of the
+build context. A requirements or constraints file that the rules leave out of the context, or a file one of them
+includes with `-r` or `-c`, is an error naming its `COPY` line and the rule: the image doesn't have it, so the build
+would fail there, and wheelgap doesn't read it from disk. That holds for a file a folder `COPY` (`COPY . .`) would
+have brought, and for one a `COPY` names itself, which Docker then doesn't find. When the ignore file has rules, a
+requirements file that is a symlink, or is reached through a symlinked folder, isn't read either: the rules may leave
+out what the link points to, and the link then dangles in the image. A pattern wheelgap can't read exactly as Docker
+does is an error naming the ignore file's line: one Docker rejects, a `\` escape before a letter or digit, any `\` on
+Windows (where Docker reads it as a path separator), an exception that climbs out of its own path
+(`!../../requirements.txt`, which Docker reads as a rule that excludes), or an empty `<Dockerfile name>.dockerignore`
+next to a `.dockerignore` with rules (which of the two Docker then uses depends on the Dockerfile frontend).
 
 ### `--dockerfile-context` {#dockerfile-context}
 
@@ -102,8 +150,8 @@ Without this flag, `--dockerfile` reads only the image.
 isn't built from its own folder. For `docker build -f docker/Dockerfile .`, run
 `wheelgap --dockerfile docker/Dockerfile --dockerfile-inputs --dockerfile-context .`. `COPY` sources are looked for in
 `DIR`, a path or symlink that leaves `DIR` is refused, and `[tool.wheelgap]` and `.python-version` are read from `DIR`.
-The ignore files are looked for where Docker reads them: `.dockerignore` at the root of `DIR`, and
-`<Dockerfile name>.dockerignore` beside the Dockerfile. A `DIR` that isn't a folder exits 2. This isn't
+The ignore file is looked for where Docker reads it: `<Dockerfile name>.dockerignore` beside the Dockerfile if there
+is one, otherwise `.dockerignore` at the root of `DIR`. A `DIR` that isn't a folder exits 2. This isn't
 `docker buildx build --build-context`, which adds named contexts.
 
 ### `--build-arg` {#build-arg}
