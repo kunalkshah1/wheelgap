@@ -659,6 +659,91 @@ def test_no_cache_does_not_save_the_gap_wheel_list(capsys, fake_pypi, gap_wheels
     assert gap_wheels.calls == 2  # but this one saved it
 
 
+def test_cached_list_without_wheel_and_live_list_with_it_fetches_once(capsys, fake_pypi, gap_wheels):
+    gap_wheels.add("psycopg2", "2.9.11", "psycopg2-2.9.11-cp314-cp314t-win_arm64.whl")
+    code, out, err = run(capsys, "psycopg2==2.9.11", "-p", "3.14t", "-t", "win-arm64", "--fix")
+    assert gap_wheels.calls == 1
+    assert "psycopg2 2.9.11: win-arm64" in out
+
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    code, out, err = run(capsys, *NOWHEELS, "--fix")
+    assert gap_wheels.calls == 2
+    assert "nowheels 0.9: win-arm64" in out
+    assert NOTHING_FITS not in err
+
+
+def test_cached_list_that_fills_the_gap_makes_no_fetch(capsys, fake_pypi, gap_wheels):
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    run(capsys, *NOWHEELS, "--fix")
+    assert gap_wheels.calls == 1
+
+    code, out, err = run(capsys, *NOWHEELS, "--fix")
+    assert gap_wheels.calls == 1
+    assert "nowheels 0.9: win-arm64" in out
+    assert NOTHING_FITS not in err
+
+
+def test_cached_list_without_wheel_and_failing_fetch_notes_cached_time(capsys, fake_pypi, gap_wheels, monkeypatch):
+    import urllib.error
+
+    from wheelgap import cache
+
+    now = 1_700_000_000.0  # 2023-11-14 22:13:20 UTC
+    monkeypatch.setattr(cache, "_now", lambda: now)
+
+    gap_wheels.add("psycopg2", "2.9.11", "psycopg2-2.9.11-cp314-cp314t-win_arm64.whl")
+    run(capsys, "psycopg2==2.9.11", "-p", "3.14t", "-t", "win-arm64", "--fix")
+    assert gap_wheels.calls == 1
+
+    gap_wheels.doc = urllib.error.URLError("temporary failure")
+    code, out, err = run(capsys, *NOWHEELS, "--fix")
+    assert gap_wheels.calls == 2
+    expected_note = (
+        "wheelgap: note: --fix: no wheel on the gap wheel list fetched at 22:13 UTC fills these gaps; "
+        "the list couldn't be refreshed"
+    )
+    assert expected_note in err
+    assert NOTHING_FITS not in err
+    assert UNREADABLE not in err
+
+    # Even with -q, like the unreadable-list note: the index couldn't be asked, so this isn't "nothing fits".
+    _, _, err_quiet = run(capsys, *NOWHEELS, "--fix", "-q")
+    assert gap_wheels.calls == 3
+    assert expected_note in err_quiet and NOTHING_FITS not in err_quiet and UNREADABLE not in err_quiet
+
+
+def test_online_fetches_the_list_even_when_the_cached_one_fills_the_gap(capsys, fake_pypi, gap_wheels):
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    run(capsys, *NOWHEELS, "--fix")
+    assert gap_wheels.calls == 1
+    _, out, _ = run(capsys, *NOWHEELS, "--fix", "--online")
+    assert gap_wheels.calls == 2 and "  nowheels 0.9: win-arm64\n" in out
+    # --online doesn't read the cached list, so a failed fetch has no list to answer from.
+    gap_wheels.doc = urllib.error.URLError("temporary failure")
+    _, out, err = run(capsys, *NOWHEELS, "--fix", "--online")
+    assert gap_wheels.calls == 3 and "  nowheels 0.9: win-arm64\n" not in out
+    assert UNREADABLE in err and "fetched at" not in err
+
+
+def test_cached_list_older_than_limit_is_fetched_again(capsys, fake_pypi, gap_wheels, monkeypatch):
+    from wheelgap import cache
+
+    now = 1_700_000_000.0
+    monkeypatch.setattr(cache, "_now", lambda: now)
+
+    gap_wheels.add("nowheels", "0.9", FT_WHEEL)
+    run(capsys, *NOWHEELS, "--fix")
+    assert gap_wheels.calls == 1
+
+    now += cache.GAP_WHEELS_MAX_AGE - 60
+    run(capsys, *NOWHEELS, "--fix")
+    assert gap_wheels.calls == 1
+
+    now += 120
+    run(capsys, *NOWHEELS, "--fix")
+    assert gap_wheels.calls == 2
+
+
 SNIPPET = ["-p", "3.14t", "-t", "win-arm64", "--fix", "--print-gap-wheel-snippet"]
 ABOUT = f"# Gap wheels are {gapwheels.UNOFFICIAL}: https://wheelgap.github.io/wheels/\n"
 

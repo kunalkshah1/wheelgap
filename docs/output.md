@@ -23,10 +23,6 @@ Add `set -o pipefail` when you pipe the output, so input errors still fail.
 
 ## Text
 
-With `--dockerfile-inputs`, text and Markdown headers show the installing RUN line beside each input,
-such as `requirements.txt (Dockerfile:4)`. GitHub annotations stay on the requirements file and name
-the installing RUN in the message.
-
 ```text
 wheelgap 0.13.0 · uv.lock · 5 packages · Python 3.13
 
@@ -54,6 +50,13 @@ Each cell is one of:
 | `? unknown` | `unknown` | couldn't be looked up; the package's error says why |
 | `–` | `n/a` | not installed on this target (environment markers exclude it, or it selects another resolution) |
 | `✓ bundled` | `bundled` | no wheel on PyPI, but Pyodide ships its own build (with `--pyodide-lock`) |
+
+With [`--dockerfile-inputs`](cli.md#dockerfile-inputs), the first line names the Dockerfile line that installs each
+file (after 0.13.0): `requirements.txt (Dockerfile:4)`, and with several files each gets its own,
+`requirements.txt (Dockerfile:4) + second.txt (Dockerfile:5)`. The line is the one the `RUN` starts on, as Docker
+numbers it, when the instruction continues over several lines. `--markdown` has the same header, and a
+[`--github-annotations`](cli.md#github-annotations) message, still placed on the requirements file's line, ends
+`(installed by Dockerfile:4)`.
 
 Packages that are fine everywhere are hidden; `--all` shows them. A range that picks a different release for
 different `-p` versions is one row per release, and the summary still counts the package once. With several targets, the summary also counts the
@@ -422,8 +425,9 @@ nowheels 0.9 on win-arm64: ● source
     pip install --extra-index-url https://wheelgap.github.io/wheels/simple/ nowheels==0.9
 ```
 
-The gap wheel list is read once and kept in the 24-hour [cache](how-it-works.md#cache) (only a list with at least one
-usable entry), with or without `--explain`; `--no-cache` neither reads nor saves it.
+The gap wheel list is read once and kept in the [cache](how-it-works.md#cache) for an hour (only a list with at least
+one usable entry), with or without `--explain`; `--no-cache` neither reads nor saves it. A cached list that fills none
+of the run's gaps is read again before wheelgap says no wheel fits.
 
 With `--json --fix`, the top-level `gap_wheels` list has one object per filled cell: `name`, `version`, `target` (the
 target label), `wheel` (its filename), `url` (where to download it) and `sha256`. It's `[]` when nothing fits, when
@@ -441,8 +445,10 @@ for inputs pip installs from as they are; a lockfile's entries have no `install`
 (JSON Schema 2020-12), which matches the wheelgap version it ships with; later versions may add keys, so ignore any
 you don't know. Keys are never renamed or removed.
 
-With `--dockerfile-inputs`, the top-level `dockerfile_inputs` list has one entry per input file. Each entry
-names the `dockerfile` path, the one-based RUN `line`, and the input `file` path.
+With [`--dockerfile-inputs`](cli.md#dockerfile-inputs) (after 0.13.0), the top-level `dockerfile_inputs` list has one
+entry per requirements file, in the order of `sources`: the `dockerfile` path as it was given, the `line` its `RUN`
+starts on (counted from 1; the first `RUN` that installs the file, if several do), and the `file` path as wheelgap
+read it from the build context, which `sources` gives by name only. The key is absent without the flag.
 
 `results`, `rejected` and `via` are all keyed by target label: just the platform (`"linux-x86_64"`) when one Python is
 checked, or Python and platform (`"3.13 linux-x86_64"`) with several. The top-level `targets` list gives each target's
